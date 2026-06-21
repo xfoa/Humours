@@ -8,7 +8,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use axum_server::tls_rustls::RustlsConfig;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::time::interval;
 use tracing;
 
@@ -85,7 +85,7 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
+async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     // Send catalog immediately upon connection
     let catalog_msg = ServerMessage::Catalog {
         metrics: state.catalog.clone(),
@@ -97,26 +97,31 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
             return;
         }
     };
-    if let Err(e) = socket.send(Message::Text(catalog_text)).await {
+
+    let socket = Arc::new(Mutex::new(socket));
+    if let Err(e) = socket.lock().await.send(Message::Text(catalog_text)).await {
         tracing::error!("failed to send catalog: {}", e);
         return;
     }
 
     let mut rx = state.tx.subscribe();
-    let mut client_subscriptions: Vec<MetricSubscription> = Vec::new();
+    let client_subscriptions: Arc<RwLock<Vec<MetricSubscription>>> = Arc::new(RwLock::new(Vec::new()));
 
     let recv_task = {
+        let socket = socket.clone();
         let state = state.clone();
+        let client_subscriptions = client_subscriptions.clone();
         async move {
-            while let Some(Ok(msg)) = socket.recv().await {
+            while let Some(Ok(msg)) = socket.lock().await.recv().await {
                 if let Message::Text(text) = msg {
                     match serde_json::from_str::<ClientMessage>(&text) {
                         Ok(ClientMessage::Subscribe { metrics }) => {
-                            client_subscriptions = metrics.clone();
-                            let mut subs = state.subscriptions.write().await;
+                            let mut subs = client_subscriptions.write().await;
+                            *subs = metrics.clone();
+                            let mut global_subs = state.subscriptions.write().await;
                             for sub in &metrics {
                                 let rounded = ((sub.refresh_rate_ms + 49) / 50) * 50;
-                                subs.insert(sub.id.clone(), rounded.max(50));
+                                global_subs.insert(sub.id.clone(), rounded.max(50));
                             }
                             tracing::debug!("client subscribed to {:?} metrics", metrics.len());
                         }
@@ -129,36 +134,42 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
         }
     };
 
-    let send_task = async move {
-        let subscribed_ids: Vec<String> = client_subscriptions.iter().map(|s| s.id.clone()).collect();
-        while let Ok(msg) = rx.recv().await {
-            let filtered_msg = match &msg {
-                ServerMessage::Data { timestamp, values } => {
-                    let filtered: HashMap<String, f64> = values
-                        .iter()
-                        .filter(|(k, _)| subscribed_ids.contains(k))
-                        .map(|(k, v)| (k.clone(), *v))
-                        .collect();
-                    if filtered.is_empty() {
+    let send_task = {
+        let socket = socket.clone();
+        let client_subscriptions = client_subscriptions.clone();
+        async move {
+            while let Ok(msg) = rx.recv().await {
+                let subs = client_subscriptions.read().await.clone();
+                let subscribed_ids: Vec<String> = subs.iter().map(|s| s.id.clone()).collect();
+                
+                let filtered_msg = match &msg {
+                    ServerMessage::Data { timestamp, values } => {
+                        let filtered: HashMap<String, f64> = values
+                            .iter()
+                            .filter(|(k, _)| subscribed_ids.contains(k))
+                            .map(|(k, v)| (k.clone(), *v))
+                            .collect();
+                        if filtered.is_empty() {
+                            continue;
+                        }
+                        ServerMessage::Data {
+                            timestamp: *timestamp,
+                            values: filtered,
+                        }
+                    }
+                    _ => msg,
+                };
+
+                let text = match serde_json::to_string(&filtered_msg) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!("failed to serialize data: {}", e);
                         continue;
                     }
-                    ServerMessage::Data {
-                        timestamp: *timestamp,
-                        values: filtered,
-                    }
+                };
+                if socket.lock().await.send(Message::Text(text)).await.is_err() {
+                    break;
                 }
-                _ => msg,
-            };
-
-            let text = match serde_json::to_string(&filtered_msg) {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::error!("failed to serialize data: {}", e);
-                    continue;
-                }
-            };
-            if socket.send(Message::Text(text)).await.is_err() {
-                break;
             }
         }
     };
