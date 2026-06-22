@@ -8,6 +8,7 @@ use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
+use axum_server::tls_rustls::RustlsConfig;
 use tokio::sync::{broadcast, RwLock};
 use crate::config::Config;
 use crate::hardware::{discover_metrics, MetricCollector, MetricCatalog};
@@ -51,12 +52,30 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     let addr = format!("{}:{}", cfg.bind_address, cfg.port).parse::<std::net::SocketAddr>()?;
 
-    tracing::info!("starting humours server on ws://{}:{}", cfg.bind_address, cfg.port);
+    ensure_certs(&cfg.tls_cert, &cfg.tls_key).await?;
+    let tls_config = RustlsConfig::from_pem_file(&cfg.tls_cert, &cfg.tls_key).await?;
 
-    axum_server::bind(addr)
+    tracing::info!("starting humours server on wss://{}:{}", cfg.bind_address, cfg.port);
+
+    axum_server::bind_rustls(addr, tls_config)
         .serve(app.into_make_service())
         .await?;
 
+    Ok(())
+}
+
+async fn ensure_certs(cert_path: &str, key_path: &str) -> anyhow::Result<()> {
+    if std::path::Path::new(cert_path).exists() && std::path::Path::new(key_path).exists() {
+        return Ok(());
+    }
+
+    tracing::info!("generating self-signed TLS certificates");
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+    let cert_pem = cert.cert.pem();
+    let key_pem = cert.key_pair.serialize_pem();
+
+    tokio::fs::write(cert_path, cert_pem).await?;
+    tokio::fs::write(key_path, key_pem).await?;
     Ok(())
 }
 

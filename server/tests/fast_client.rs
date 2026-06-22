@@ -2,12 +2,20 @@ use humours_server::protocol::{ClientMessage, MetricSubscription};
 use std::time::Instant;
 
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async_tls_with_config, tungstenite::Message, Connector,
+};
 
 #[tokio::test]
 async fn fast_subscribe_client() {
-    let url = "ws://localhost:8443/ws?token=dev-token";
-    let (mut ws, _) = connect_async(url).await.expect("connect");
+    let url = "wss://localhost:8443/ws?token=dev-token";
+    let tls = native_tls::TlsConnector::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("tls");
+    let (mut ws, _) = connect_async_tls_with_config(url, None, false, Some(Connector::NativeTls(tls)))
+        .await
+        .expect("connect");
 
     let msg = ClientMessage::Subscribe {
         metrics: vec![MetricSubscription {
