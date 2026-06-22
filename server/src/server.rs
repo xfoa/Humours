@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use futures_util::{SinkExt, StreamExt};
@@ -19,6 +19,7 @@ pub struct AppState {
     pub tx: broadcast::Sender<ServerMessage>,
     pub auth_token: String,
     pub subscriptions: Arc<RwLock<HashMap<String, u64>>>,
+    pub time_base: (Instant, i64),
 }
 
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
@@ -27,11 +28,16 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let (tx, _) = broadcast::channel(1024);
     tracing::debug!("broadcast channel created with capacity 1024");
 
+    let unix_start = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
     let state = Arc::new(AppState {
         catalog: catalog.clone(),
         tx: tx.clone(),
         auth_token: cfg.auth_token.clone(),
         subscriptions: Arc::new(RwLock::new(HashMap::new())),
+        time_base: (Instant::now(), unix_start),
     });
     tracing::debug!("app state initialized, auth_token length = {}", state.auth_token.len());
 
@@ -194,10 +200,6 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                     tracing::debug!("websocket send failed, closing send_task");
                     break;
                 }
-                if sink.flush().await.is_err() {
-                    tracing::debug!("websocket flush failed, closing send_task");
-                    break;
-                }
             }
             tracing::debug!("send_task ended");
         }
@@ -221,35 +223,37 @@ async fn metric_collection_loop(state: Arc<AppState>) {
     let mut collector = MetricCollector::new();
     let mut tick: u64 = 0;
     let grid_ms: u64 = 50;
-    let mut interval = tokio::time::interval(Duration::from_millis(grid_ms));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let grid = Duration::from_millis(grid_ms);
     tracing::debug!("metric collection loop started with {} ms grid", grid_ms);
 
     loop {
-        interval.tick().await;
-        tick = tick.wrapping_add(1);
-
         let receiver_count = state.tx.receiver_count();
         if receiver_count == 0 {
             let mut subs = state.subscriptions.write().await;
             subs.clear();
             tracing::debug!("no receivers, clearing subscriptions");
+            tokio::time::sleep(grid).await;
             continue;
         }
 
         let subscriptions = state.subscriptions.read().await.clone();
         tracing::debug!("metric loop tick {}, subscriptions = {:?}", tick, subscriptions);
         if subscriptions.is_empty() {
+            tokio::time::sleep(grid).await;
             continue;
         }
 
+        let mut next_due_ticks = u64::MAX;
         collector.begin_batch();
         let mut values = HashMap::new();
         for (metric_id, refresh_rate_ms) in &subscriptions {
             let quantized = quantize_interval(*refresh_rate_ms, grid_ms);
-            if tick % (quantized / grid_ms) == 0 {
+            let period_ticks = quantized / grid_ms;
+            let due_in = period_ticks - (tick % period_ticks);
+            next_due_ticks = next_due_ticks.min(due_in);
+            if due_in == period_ticks {
                 if let Some(val) = collector.get_value(metric_id) {
-                    tracing::info!("collected metric {} = {}", metric_id, val);
+                    tracing::debug!("collected metric {} = {}", metric_id, val);
                     values.insert(metric_id.clone(), val);
                 } else {
                     tracing::warn!("metric {} not available", metric_id);
@@ -259,14 +263,21 @@ async fn metric_collection_loop(state: Arc<AppState>) {
         }
 
         if !values.is_empty() {
+            let (base_instant, base_unix_ms) = state.time_base;
+            let timestamp = base_unix_ms + base_instant.elapsed().as_millis() as i64;
             let msg = ServerMessage::Data {
-                timestamp: chrono::Utc::now().timestamp_millis(),
+                timestamp,
                 values: values.clone(),
             };
             tracing::info!("broadcasting data to {} metrics", values.len());
             tracing::debug!("broadcast values: {:?}", values);
             let _ = state.tx.send(msg);
         }
+
+        let sleep_ticks = next_due_ticks.max(1);
+        tick = tick.wrapping_add(sleep_ticks);
+        tracing::debug!("metric loop sleeping for {} ticks", sleep_ticks);
+        tokio::time::sleep(grid * sleep_ticks as u32).await;
     }
 }
 
