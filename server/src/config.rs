@@ -25,12 +25,16 @@ impl Default for Config {
 
 pub fn load() -> anyhow::Result<Config> {
     let path = std::env::args().nth(1).unwrap_or_else(|| "config.yaml".to_string());
+    tracing::debug!("loading config from path: {}", path);
     if Path::new(&path).exists() {
         let content = std::fs::read_to_string(&path)?;
         let cfg: Config = serde_yaml::from_str(&content)?;
+        tracing::debug!("loaded config: {:?}", cfg);
         Ok(cfg)
     } else {
         tracing::warn!("config file not found, using defaults");
-        Ok(Config::default())
+        let cfg = Config::default();
+        tracing::debug!("default config: {:?}", cfg);
+        Ok(cfg)
     }
 }
