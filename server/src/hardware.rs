@@ -1,101 +1,96 @@
-use serde::{Deserialize, Serialize};
+use crate::protocol::CatalogMetric;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use sysinfo::{CpuRefreshKind, ProcessRefreshKind, RefreshKind, System};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct MetricCatalog {
-    pub id: String,
-    pub name: String,
-    pub unit: String,
+pub const POLL_QUANTUM_MS: u64 = 50;
+
+pub fn build_catalog() -> Vec<CatalogMetric> {
+    vec![
+        CatalogMetric { id: "cpu.usage".to_string(), name: "CPU Usage".to_string(), unit: "%".to_string(), r#static: false },
+        CatalogMetric { id: "cpu.cores".to_string(), name: "CPU Core Count".to_string(), unit: "cores".to_string(), r#static: true },
+        CatalogMetric { id: "mem.used".to_string(), name: "Memory Used".to_string(), unit: "GB".to_string(), r#static: false },
+        CatalogMetric { id: "mem.total".to_string(), name: "Memory Total".to_string(), unit: "GB".to_string(), r#static: true },
+        CatalogMetric { id: "mem.usage".to_string(), name: "Memory Usage".to_string(), unit: "%".to_string(), r#static: false },
+        CatalogMetric { id: "swap.used".to_string(), name: "Swap Used".to_string(), unit: "GB".to_string(), r#static: false },
+        CatalogMetric { id: "swap.total".to_string(), name: "Swap Total".to_string(), unit: "GB".to_string(), r#static: true },
+        CatalogMetric { id: "sys.uptime".to_string(), name: "System Uptime".to_string(), unit: "s".to_string(), r#static: false },
+        CatalogMetric { id: "sys.load1".to_string(), name: "Load Average (1m)".to_string(), unit: "".to_string(), r#static: false },
+        CatalogMetric { id: "proc.count".to_string(), name: "Process Count".to_string(), unit: "procs".to_string(), r#static: false },
+    ]
 }
 
-pub fn discover_metrics() -> Vec<MetricCatalog> {
-    let mut metrics = vec![
-        MetricCatalog {
-            id: "cpu.usage".to_string(),
-            name: "CPU Usage".to_string(),
-            unit: "%".to_string(),
-        },
-        MetricCatalog {
-            id: "mem.used".to_string(),
-            name: "Memory Used".to_string(),
-            unit: "GB".to_string(),
-        },
-        MetricCatalog {
-            id: "mem.total".to_string(),
-            name: "Memory Total".to_string(),
-            unit: "GB".to_string(),
-        },
-    ];
-
-    if let Ok(hw) = hardware_query::HardwareInfo::query() {
-        let cpu = hw.cpu();
-        for metric in &mut metrics {
-            if metric.id == "cpu.usage" {
-                metric.name = format!("CPU Usage ({} {})", cpu.vendor(), cpu.model_name());
-            }
-        }
-        let mem = hw.memory();
-        let total_gb = mem.total_gb();
-        for metric in &mut metrics {
-            if metric.id == "mem.total" {
-                metric.name = format!("Memory Total ({:.0} GB)", total_gb);
-            } else if metric.id == "mem.used" {
-                metric.name = format!("Memory Used / {:.0} GB", total_gb);
-            }
-        }
+pub fn round_to_quantum(ms: u64) -> u64 {
+    if ms == 0 {
+        return POLL_QUANTUM_MS;
     }
-
-    tracing::debug!("discovered {} metrics: {:?}", metrics.len(), metrics);
-    metrics
+    let q = POLL_QUANTUM_MS;
+    let rounded = ((ms + q - 1) / q) * q;
+    rounded.max(q)
 }
 
-pub struct MetricCollector {
-    last_cpu: Option<hardware_query::CPUInfo>,
-    last_mem: Option<hardware_query::MemoryInfo>,
-    cpu_refreshed: bool,
-    memory_refreshed: bool,
+pub struct Collector {
+    sys: Arc<Mutex<System>>,
 }
 
-impl MetricCollector {
+impl Collector {
     pub fn new() -> Self {
-        tracing::debug!("MetricCollector initialized");
-        Self {
-            last_cpu: None,
-            last_mem: None,
-            cpu_refreshed: false,
-            memory_refreshed: false,
-        }
+        let sys = System::new_with_specifics(
+            RefreshKind::new()
+                .with_cpu(CpuRefreshKind::new().with_cpu_usage())
+                .with_memory(sysinfo::MemoryRefreshKind::new().with_ram().with_swap())
+                .with_processes(ProcessRefreshKind::new()),
+        );
+        Self { sys: Arc::new(Mutex::new(sys)) }
     }
 
-    pub fn begin_batch(&mut self) {
-        self.cpu_refreshed = false;
-        self.memory_refreshed = false;
-    }
+    pub fn sample(&self, metric_id: &str) -> Option<f64> {
+        let mut sys = self.sys.lock().ok()?;
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
 
-    pub fn get_value(&mut self, metric_id: &str) -> Option<f64> {
-        tracing::debug!("get_value called for metric_id: {}", metric_id);
+        let bytes_to_gb = |b: u64| (b as f64) / 1024.0 / 1024.0 / 1024.0;
+
         match metric_id {
             "cpu.usage" => {
-                if !self.cpu_refreshed {
-                    self.last_cpu = hardware_query::CPUInfo::query().ok();
-                    self.cpu_refreshed = true;
+                let cpus = sys.cpus();
+                if cpus.is_empty() {
+                    return None;
                 }
-                self.last_cpu.as_ref()?.core_usage().first().map(|&u| u as f64)
+                let sum: f64 = cpus.iter().map(|c| c.cpu_usage() as f64).sum();
+                Some(sum / cpus.len() as f64)
             }
-            "mem.used" => {
-                if !self.memory_refreshed {
-                    self.last_mem = hardware_query::MemoryInfo::query().ok();
-                    self.memory_refreshed = true;
+            "cpu.cores" => Some(sys.cpus().len() as f64),
+            "mem.used" => Some(bytes_to_gb(sys.used_memory())),
+            "mem.total" => Some(bytes_to_gb(sys.total_memory())),
+            "mem.usage" => {
+                let total = sys.total_memory() as f64;
+                if total == 0.0 {
+                    None
+                } else {
+                    Some((sys.used_memory() as f64 / total) * 100.0)
                 }
-                Some(self.last_mem.as_ref()?.used_gb())
             }
-            "mem.total" => {
-                if !self.memory_refreshed {
-                    self.last_mem = hardware_query::MemoryInfo::query().ok();
-                    self.memory_refreshed = true;
-                }
-                Some(self.last_mem.as_ref()?.total_gb())
+            "swap.used" => Some(bytes_to_gb(sys.used_swap())),
+            "swap.total" => Some(bytes_to_gb(sys.total_swap())),
+            "sys.uptime" => Some(sysinfo::System::uptime() as f64),
+            "sys.load1" => {
+                let load = System::load_average();
+                Some(load.one)
             }
+            "proc.count" => Some(sys.processes().len() as f64),
             _ => None,
         }
     }
+
+    pub fn sample_many(&self, ids: &[String]) -> HashMap<String, f64> {
+        let mut out = HashMap::with_capacity(ids.len());
+        for id in ids {
+            if let Some(v) = self.sample(id) {
+                out.insert(id.clone(), v);
+            }
+        }
+        out
+    }
 }
+

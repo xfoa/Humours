@@ -1,42 +1,34 @@
+use clap::Parser;
 use serde::Deserialize;
-use std::path::Path;
+use std::path::PathBuf;
 
-#[derive(Debug, Deserialize, Clone)]
-#[serde(default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub bind_address: String,
     pub port: u16,
-    pub tls_cert: String,
-    pub tls_key: String,
+    pub tls_cert: Option<PathBuf>,
+    pub tls_key: Option<PathBuf>,
     pub auth_token: String,
+    #[serde(default = "default_refresh")]
+    pub default_refresh_rate_ms: u64,
+    #[serde(default = "default_poll")]
+    pub poll_interval_ms: u64,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            bind_address: "0.0.0.0".to_string(),
-            port: 8443,
-            tls_cert: "cert.pem".to_string(),
-            tls_key: "key.pem".to_string(),
-            auth_token: "dev-token".to_string(),
-        }
-    }
+fn default_refresh() -> u64 { 500 }
+fn default_poll() -> u64 { 50 }
+
+#[derive(Debug, Parser)]
+#[command(name = "humours-server", about = "Real-time hardware metrics streaming server")]
+pub struct Cli {
+    #[arg(short, long, default_value = "config.toml")]
+    pub config: PathBuf,
 }
 
-pub fn load() -> anyhow::Result<Config> {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "config.yaml".to_string());
-    tracing::debug!("loading config from path: {}", path);
-    if Path::new(&path).exists() {
-        let content = std::fs::read_to_string(&path)?;
-        let cfg: Config = serde_yaml::from_str(&content)?;
-        tracing::debug!("loaded config: {:?}", cfg);
-        Ok(cfg)
-    } else {
-        tracing::warn!("config file not found, using defaults");
-        let cfg = Config::default();
-        tracing::debug!("default config: {:?}", cfg);
+impl Config {
+    pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
+        let raw = std::fs::read_to_string(path)?;
+        let cfg: Config = toml::from_str(&raw)?;
         Ok(cfg)
     }
 }
