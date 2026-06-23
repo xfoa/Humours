@@ -2,17 +2,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::config::Config;
+use crate::hardware::{MetricCatalog, MetricCollector, discover_metrics};
+use crate::protocol::{ClientMessage, MetricSubscription, ServerMessage};
+use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use futures_util::{SinkExt, StreamExt};
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 use axum_server::tls_rustls::RustlsConfig;
-use tokio::sync::{broadcast, RwLock};
-use crate::config::Config;
-use crate::hardware::{discover_metrics, MetricCollector, MetricCatalog};
-use crate::protocol::{ClientMessage, MetricSubscription, ServerMessage};
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::{RwLock, broadcast};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -40,7 +40,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         subscriptions: Arc::new(RwLock::new(HashMap::new())),
         time_base: (Instant::now(), unix_start),
     });
-    tracing::debug!("app state initialized, auth_token length = {}", state.auth_token.len());
+    tracing::debug!(
+        "app state initialized, auth_token length = {}",
+        state.auth_token.len()
+    );
 
     // Start the metric collection loop
     let state_clone = state.clone();
@@ -55,7 +58,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     ensure_certs(&cfg.tls_cert, &cfg.tls_key).await?;
     let tls_config = RustlsConfig::from_pem_file(&cfg.tls_cert, &cfg.tls_key).await?;
 
-    tracing::info!("starting humours server on wss://{}:{}", cfg.bind_address, cfg.port);
+    tracing::info!(
+        "starting humours server on wss://{}:{}",
+        cfg.bind_address,
+        cfg.port
+    );
 
     axum_server::bind_rustls(addr, tls_config)
         .serve(app.into_make_service())
@@ -79,14 +86,16 @@ async fn ensure_certs(cert_path: &str, key_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-
 async fn ws_handler(
     ws: WebSocketUpgrade,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let token = params.get("token").cloned().unwrap_or_default();
-    tracing::debug!("websocket connection attempt, token present = {}", !token.is_empty());
+    tracing::debug!(
+        "websocket connection attempt, token present = {}",
+        !token.is_empty()
+    );
     tracing::info!("websocket connection attempt, token={}", token);
     if token != state.auth_token {
         tracing::warn!("unauthorized connection attempt with token={}", token);
@@ -120,7 +129,8 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     tracing::info!("catalog sent successfully");
 
     let mut rx = state.tx.subscribe();
-    let client_subscriptions: Arc<RwLock<Vec<MetricSubscription>>> = Arc::new(RwLock::new(Vec::new()));
+    let client_subscriptions: Arc<RwLock<Vec<MetricSubscription>>> =
+        Arc::new(RwLock::new(Vec::new()));
 
     let (mut sink, mut stream) = socket.split();
 
@@ -142,8 +152,15 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                     let quantized = quantize_interval(sub.refresh_rate_ms, 50);
                                     global_subs.insert(sub.id.clone(), quantized);
                                 }
-                                tracing::info!("client subscribed to {} metrics: {:?}", metrics.len(), metrics);
-                                tracing::debug!("updated global subscriptions: {:?}", global_subs.clone());
+                                tracing::info!(
+                                    "client subscribed to {} metrics: {:?}",
+                                    metrics.len(),
+                                    metrics
+                                );
+                                tracing::debug!(
+                                    "updated global subscriptions: {:?}",
+                                    global_subs.clone()
+                                );
                             }
                             Err(e) => {
                                 tracing::warn!("invalid client message: {}", e);
@@ -185,7 +202,10 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                     .iter()
                     .map(|s| s.id.clone())
                     .collect();
-                tracing::debug!("send_task got msg, client subscriptions = {:?}", subscribed_ids);
+                tracing::debug!(
+                    "send_task got msg, client subscriptions = {:?}",
+                    subscribed_ids
+                );
 
                 let filtered_msg = match &msg {
                     ServerMessage::Data { timestamp, values } => {
@@ -194,7 +214,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             .filter(|(k, _)| subscribed_ids.contains(*k))
                             .map(|(k, v)| (k.clone(), *v))
                             .collect();
-                        tracing::debug!("filtered values from {} to {} keys", values.len(), filtered.len());
+                        tracing::debug!(
+                            "filtered values from {} to {} keys",
+                            values.len(),
+                            filtered.len()
+                        );
                         if filtered.is_empty() {
                             continue;
                         }
@@ -234,7 +258,10 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     for sub in &subs {
         global_subs.remove(&sub.id);
     }
-    tracing::debug!("removed client subscriptions, global_subs = {:?}", global_subs.clone());
+    tracing::debug!(
+        "removed client subscriptions, global_subs = {:?}",
+        global_subs.clone()
+    );
     tracing::info!("websocket disconnected");
 }
 
@@ -256,7 +283,11 @@ async fn metric_collection_loop(state: Arc<AppState>) {
         }
 
         let subscriptions = state.subscriptions.read().await.clone();
-        tracing::debug!("metric loop tick {}, subscriptions = {:?}", tick, subscriptions);
+        tracing::debug!(
+            "metric loop tick {}, subscriptions = {:?}",
+            tick,
+            subscriptions
+        );
         if subscriptions.is_empty() {
             tokio::time::sleep(grid).await;
             continue;

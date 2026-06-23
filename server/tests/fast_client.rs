@@ -6,9 +6,7 @@ use futures_util::{SinkExt, StreamExt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error};
-use tokio_tungstenite::{
-    connect_async_tls_with_config, tungstenite::Message, Connector,
-};
+use tokio_tungstenite::{Connector, connect_async_tls_with_config, tungstenite::Message};
 
 #[derive(Debug)]
 struct NoVerifier;
@@ -72,11 +70,9 @@ async fn fast_subscribe_client() {
             refresh_rate_ms: 1,
         }],
     };
-    ws.send(Message::Text(
-        serde_json::to_string(&msg).unwrap().into(),
-    ))
-    .await
-    .unwrap();
+    ws.send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+        .await
+        .unwrap();
 
     let start = Instant::now();
     let mut last = start;

@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use sysinfo::System;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MetricCatalog {
@@ -9,7 +8,7 @@ pub struct MetricCatalog {
 }
 
 pub fn discover_metrics() -> Vec<MetricCatalog> {
-    let metrics = vec![
+    let mut metrics = vec![
         MetricCatalog {
             id: "cpu.usage".to_string(),
             name: "CPU Usage".to_string(),
@@ -26,23 +25,42 @@ pub fn discover_metrics() -> Vec<MetricCatalog> {
             unit: "GB".to_string(),
         },
     ];
+
+    if let Ok(hw) = hardware_query::HardwareInfo::query() {
+        let cpu = hw.cpu();
+        for metric in &mut metrics {
+            if metric.id == "cpu.usage" {
+                metric.name = format!("CPU Usage ({} {})", cpu.vendor(), cpu.model_name());
+            }
+        }
+        let mem = hw.memory();
+        let total_gb = mem.total_gb();
+        for metric in &mut metrics {
+            if metric.id == "mem.total" {
+                metric.name = format!("Memory Total ({:.0} GB)", total_gb);
+            } else if metric.id == "mem.used" {
+                metric.name = format!("Memory Used / {:.0} GB", total_gb);
+            }
+        }
+    }
+
     tracing::debug!("discovered {} metrics: {:?}", metrics.len(), metrics);
     metrics
 }
 
 pub struct MetricCollector {
-    system: System,
+    last_cpu: Option<hardware_query::CPUInfo>,
+    last_mem: Option<hardware_query::MemoryInfo>,
     cpu_refreshed: bool,
     memory_refreshed: bool,
 }
 
 impl MetricCollector {
     pub fn new() -> Self {
-        let mut system = System::new_all();
-        system.refresh_all();
-        tracing::debug!("MetricCollector initialized with {} cpus", system.cpus().len());
+        tracing::debug!("MetricCollector initialized");
         Self {
-            system,
+            last_cpu: None,
+            last_mem: None,
             cpu_refreshed: false,
             memory_refreshed: false,
         }
@@ -58,24 +76,24 @@ impl MetricCollector {
         match metric_id {
             "cpu.usage" => {
                 if !self.cpu_refreshed {
-                    self.system.refresh_cpu_usage();
+                    self.last_cpu = hardware_query::CPUInfo::query().ok();
                     self.cpu_refreshed = true;
                 }
-                self.system.cpus().first().map(|cpu| cpu.cpu_usage() as f64)
+                self.last_cpu.as_ref()?.core_usage().first().map(|&u| u as f64)
             }
             "mem.used" => {
                 if !self.memory_refreshed {
-                    self.system.refresh_memory();
+                    self.last_mem = hardware_query::MemoryInfo::query().ok();
                     self.memory_refreshed = true;
                 }
-                Some(self.system.used_memory() as f64 / (1024.0 * 1024.0 * 1024.0)) // GB
+                Some(self.last_mem.as_ref()?.used_gb())
             }
             "mem.total" => {
                 if !self.memory_refreshed {
-                    self.system.refresh_memory();
+                    self.last_mem = hardware_query::MemoryInfo::query().ok();
                     self.memory_refreshed = true;
                 }
-                Some(self.system.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0)) // GB
+                Some(self.last_mem.as_ref()?.total_gb())
             }
             _ => None,
         }

@@ -16,7 +16,11 @@ async fn main() {
             return;
         }
     };
-    tracing::info!("starting humours server on https://{}:{}", cfg.bind_address, cfg.port);
+    tracing::info!(
+        "starting humours server on https://{}:{}",
+        cfg.bind_address,
+        cfg.port
+    );
 
     if let Err(e) = server::run(cfg).await {
         tracing::error!("server error: {}", e);

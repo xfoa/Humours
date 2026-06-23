@@ -24,7 +24,9 @@ impl Default for Config {
 }
 
 pub fn load() -> anyhow::Result<Config> {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "config.yaml".to_string());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "config.yaml".to_string());
     tracing::debug!("loading config from path: {}", path);
     if Path::new(&path).exists() {
         let content = std::fs::read_to_string(&path)?;

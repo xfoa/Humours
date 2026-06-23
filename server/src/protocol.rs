@@ -18,7 +18,12 @@ pub struct MetricSubscription {
 #[serde(tag = "type")]
 pub enum ServerMessage {
     #[serde(rename = "catalog")]
-    Catalog { metrics: Vec<super::hardware::MetricCatalog> },
+    Catalog {
+        metrics: Vec<super::hardware::MetricCatalog>,
+    },
     #[serde(rename = "data")]
-    Data { timestamp: i64, values: HashMap<String, f64> },
+    Data {
+        timestamp: i64,
+        values: HashMap<String, f64>,
+    },
 }
