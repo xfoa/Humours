@@ -110,8 +110,9 @@ fn read_private_key(key_pem: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 async fn self_signed_tls_config() -> anyhow::Result<axum_server::tls_rustls::RustlsConfig> {
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])?;
-    let cert_der = cert.serialize_der()?;
-    let key_der = cert.serialize_private_key_der();
+    let rcgen::CertifiedKey { cert, signing_key } =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])?;
+    let cert_der = cert.der().to_vec();
+    let key_der = signing_key.serialize_der();
     Ok(axum_server::tls_rustls::RustlsConfig::from_der(vec![cert_der], key_der).await?)
 }

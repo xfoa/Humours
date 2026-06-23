@@ -101,7 +101,7 @@ async fn subscribe_and_receive_data() {
             },
         ],
     };
-    ws.send(Message::Text(serde_json::to_string(&sub).unwrap()))
+    ws.send(Message::Text(serde_json::to_string(&sub).unwrap().into()))
         .await
         .unwrap();
 
@@ -149,7 +149,7 @@ async fn data_messages_only_contain_subscribed_metrics() {
             unit: None,
         }],
     };
-    ws.send(Message::Text(serde_json::to_string(&sub).unwrap()))
+    ws.send(Message::Text(serde_json::to_string(&sub).unwrap().into()))
         .await
         .unwrap();
 
@@ -194,7 +194,7 @@ async fn static_metric_sent_once_on_subscribe() {
             },
         ],
     };
-    ws.send(Message::Text(serde_json::to_string(&sub).unwrap()))
+    ws.send(Message::Text(serde_json::to_string(&sub).unwrap().into()))
         .await
         .unwrap();
 
@@ -233,7 +233,7 @@ async fn refresh_rate_on_static_metric_returns_error() {
             unit: None,
         }],
     };
-    ws.send(Message::Text(serde_json::to_string(&sub).unwrap()))
+    ws.send(Message::Text(serde_json::to_string(&sub).unwrap().into()))
         .await
         .unwrap();
 
@@ -265,7 +265,7 @@ async fn malformed_json_returns_error() {
     let mut ws = connect(&url, Some("secret")).await;
     let _ = ws.next().await.unwrap();
 
-    ws.send(Message::Text("not json at all".to_string())).await.unwrap();
+    ws.send(Message::Text("not json at all".to_string().into())).await.unwrap();
 
     let mut got_error = false;
     let start = std::time::Instant::now();
@@ -303,7 +303,7 @@ async fn custom_unit_is_honored() {
             unit: Some("MB".to_string()),
         }],
     };
-    ws.send(Message::Text(serde_json::to_string(&sub).unwrap()))
+    ws.send(Message::Text(serde_json::to_string(&sub).unwrap().into()))
         .await
         .unwrap();
 
@@ -350,7 +350,7 @@ async fn data_message_includes_units() {
             },
         ],
     };
-    ws.send(Message::Text(serde_json::to_string(&sub).unwrap()))
+    ws.send(Message::Text(serde_json::to_string(&sub).unwrap().into()))
         .await
         .unwrap();
 
@@ -394,7 +394,7 @@ async fn invalid_unit_returns_error() {
             unit: Some("frobnicate".to_string()),
         }],
     };
-    ws.send(Message::Text(serde_json::to_string(&sub).unwrap()))
+    ws.send(Message::Text(serde_json::to_string(&sub).unwrap().into()))
         .await
         .unwrap();
 
@@ -435,7 +435,7 @@ async fn sub_50ms_rate_fires_within_quantum_window() {
             unit: None,
         }],
     };
-    ws.send(Message::Text(serde_json::to_string(&sub).unwrap()))
+    ws.send(Message::Text(serde_json::to_string(&sub).unwrap().into()))
         .await
         .unwrap();
 

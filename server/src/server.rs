@@ -88,7 +88,9 @@ async fn ws_handler(
         return ws.on_upgrade(|mut socket| async move {
             let _ = socket
                 .send(Message::Text(
-                    serde_json::to_string(&ErrorMessage::new("unauthorized")).unwrap(),
+                    serde_json::to_string(&ErrorMessage::new("unauthorized"))
+                        .unwrap()
+                        .into(),
                 ))
                 .await;
             let _ = socket.close().await;
@@ -104,7 +106,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         serde_json::to_string(&CatalogMessage::new(state.catalog.as_ref().clone()));
     match catalog_msg {
         Ok(text) => {
-            if sink.send(Message::Text(text)).await.is_err() {
+            if sink.send(Message::Text(text.into())).await.is_err() {
                 return;
             }
         }
@@ -132,7 +134,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             continue;
                         }
                     };
-                    if sink.send(Message::Text(text)).await.is_err() {
+                    if sink.send(Message::Text(text.into())).await.is_err() {
                         break;
                     }
                 }

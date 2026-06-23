@@ -70,10 +70,10 @@ impl Default for Collector {
 impl Collector {
     pub fn new() -> Self {
         let sys = System::new_with_specifics(
-            RefreshKind::new()
-                .with_cpu(CpuRefreshKind::new().with_cpu_usage())
-                .with_memory(sysinfo::MemoryRefreshKind::new().with_ram().with_swap())
-                .with_processes(ProcessRefreshKind::new()),
+            RefreshKind::nothing()
+                .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
+                .with_memory(sysinfo::MemoryRefreshKind::nothing().with_ram().with_swap())
+                .with_processes(ProcessRefreshKind::nothing()),
         );
         Self { sys: Arc::new(Mutex::new(sys)) }
     }
@@ -82,7 +82,7 @@ impl Collector {
         let mut sys = self.sys.lock().expect("Collector mutex poisoned");
         sys.refresh_cpu_usage();
         sys.refresh_memory();
-        sys.refresh_processes();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     }
 
     fn read_raw(&self, metric_id: &str) -> Option<f64> {
