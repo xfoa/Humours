@@ -12,11 +12,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let config_path = if cli.config.exists() {
-        cli.config
-    } else {
-        std::path::PathBuf::from("server/config.toml")
-    };
+    let config_path = humours_server::config::Config::resolve_or_create(&cli.config)?;
     let config = humours_server::config::Config::load(&config_path)
         .map_err(|e| anyhow::anyhow!("failed to load config from `{}`: {e}", config_path.display()))?;
 
