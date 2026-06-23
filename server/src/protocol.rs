@@ -16,6 +16,8 @@ pub enum MetricDataType {
     Float,
     Integer,
     Boolean,
+    String,
+    StringList,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +49,8 @@ pub enum MetricNumber {
     Float(f64),
     Integer(i64),
     Boolean(bool),
+    String(String),
+    StringList(Vec<String>),
 }
 
 impl From<f64> for MetricNumber {
@@ -67,6 +71,18 @@ impl From<bool> for MetricNumber {
     }
 }
 
+impl From<String> for MetricNumber {
+    fn from(v: String) -> Self {
+        MetricNumber::String(v)
+    }
+}
+
+impl From<Vec<String>> for MetricNumber {
+    fn from(v: Vec<String>) -> Self {
+        MetricNumber::StringList(v)
+    }
+}
+
 impl MetricNumber {
     pub fn as_f64(&self) -> f64 {
         match self {
@@ -79,6 +95,22 @@ impl MetricNumber {
                     0.0
                 }
             }
+            MetricNumber::String(_) => 0.0,
+            MetricNumber::StringList(_) => 0.0,
+        }
+    }
+
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            MetricNumber::String(v) => Some(v.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn as_string_list(&self) -> Option<&[String]> {
+        match self {
+            MetricNumber::StringList(v) => Some(v.as_slice()),
+            _ => None,
         }
     }
 }

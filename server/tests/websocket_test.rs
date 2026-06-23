@@ -220,6 +220,143 @@ async fn static_metric_sent_once_on_subscribe() {
 }
 
 #[tokio::test]
+async fn net_string_list_metrics_delivered() {
+    let url = spawn(make_state()).await;
+    let mut ws = connect(&url, Some("secret")).await;
+    let _ = ws.next().await.unwrap();
+
+    let sub = SubscribeMessage {
+        msg_type: "subscribe".to_string(),
+        metrics: vec![
+            humours_server::protocol::SubscribeEntry {
+                id: "net.interfaces".to_string(),
+                refresh_rate_ms: None,
+                unit: None,
+            },
+            humours_server::protocol::SubscribeEntry {
+                id: "net.ip_addresses".to_string(),
+                refresh_rate_ms: None,
+                unit: None,
+            },
+            humours_server::protocol::SubscribeEntry {
+                id: "net.wifi_ssids".to_string(),
+                refresh_rate_ms: None,
+                unit: None,
+            },
+            humours_server::protocol::SubscribeEntry {
+                id: "net.routes".to_string(),
+                refresh_rate_ms: None,
+                unit: None,
+            },
+        ],
+    };
+    ws.send(Message::Text(serde_json::to_string(&sub).unwrap().into()))
+        .await
+        .unwrap();
+
+    let mut got_names = false;
+    let mut got_ips = false;
+    let mut got_ssids = false;
+    let mut got_route = false;
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(600) {
+        let raw = match tokio::time::timeout(std::time::Duration::from_millis(100), ws.next())
+            .await
+        {
+            Ok(Some(Ok(m))) => m.into_text().unwrap(),
+            _ => continue,
+        };
+        if let Ok(msg) = serde_json::from_str::<DataMessage>(&raw) {
+            if let Some(mv) = find_metric(&msg, "net.interfaces") {
+                assert!(mv.value.as_string_list().is_some(), "net.interfaces value is not a string list");
+                got_names = true;
+            }
+            if let Some(mv) = find_metric(&msg, "net.ip_addresses") {
+                assert!(mv.value.as_string_list().is_some(), "net.ip_addresses value is not a string list");
+                got_ips = true;
+            }
+            if let Some(mv) = find_metric(&msg, "net.wifi_ssids") {
+                assert!(mv.value.as_string_list().is_some(), "net.wifi_ssids value is not a string list");
+                got_ssids = true;
+            }
+            if let Some(mv) = find_metric(&msg, "net.routes") {
+                let list = mv.value.as_string_list().expect("net.routes value is not a string list");
+                assert!(
+                    list.iter().all(|e| e.matches(':').count() >= 2),
+                    "net.routes entries should be if:route:hop, got {:?}",
+                    list
+                );
+                got_route = true;
+            }
+        }
+        if got_names && got_ips && got_ssids && got_route {
+            break;
+        }
+    }
+    assert!(got_names, "never received net.interfaces metric");
+    assert!(got_ips, "never received net.ip_addresses static metric");
+    assert!(got_ssids, "never received net.wifi_ssids static metric");
+    assert!(got_route, "never received net.routes string-list metric");
+}
+
+#[tokio::test]
+async fn net_rate_and_count_string_list_metrics_delivered() {
+    let url = spawn(make_state()).await;
+    let mut ws = connect(&url, Some("secret")).await;
+    let _ = ws.next().await.unwrap();
+
+    let sub = SubscribeMessage {
+        msg_type: "subscribe".to_string(),
+        metrics: vec![
+            humours_server::protocol::SubscribeEntry {
+                id: "net.rx_bytes_rate".to_string(),
+                refresh_rate_ms: Some(100),
+                unit: None,
+            },
+            humours_server::protocol::SubscribeEntry {
+                id: "net.tx_packets".to_string(),
+                refresh_rate_ms: Some(100),
+                unit: None,
+            },
+        ],
+    };
+    ws.send(Message::Text(serde_json::to_string(&sub).unwrap().into()))
+        .await
+        .unwrap();
+
+    let mut got_rate = false;
+    let mut got_count = false;
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(800) {
+        let raw = match tokio::time::timeout(std::time::Duration::from_millis(120), ws.next())
+            .await
+        {
+            Ok(Some(Ok(m))) => m.into_text().unwrap(),
+            _ => continue,
+        };
+        if let Ok(msg) = serde_json::from_str::<DataMessage>(&raw) {
+            if let Some(mv) = find_metric(&msg, "net.rx_bytes_rate") {
+                let list = mv.value.as_string_list()
+                    .expect("net.rx_bytes_rate value is not a string list");
+                assert!(list.iter().all(|e| e.contains(':')), "net.rx_bytes_rate entries should be iface:value");
+                got_rate = true;
+            }
+            if let Some(mv) = find_metric(&msg, "net.tx_packets") {
+                let list = mv.value.as_string_list()
+                    .expect("net.tx_packets value is not a string list");
+                assert!(list.iter().all(|e| e.contains(':')), "net.tx_packets entries should be iface:value");
+                got_count = true;
+            }
+        }
+        if got_rate && got_count {
+            break;
+        }
+    }
+    assert!(got_rate, "never received net.rx_bytes_rate string-list metric");
+    assert!(got_count, "never received net.tx_packets count string-list metric");
+}
+
+#[tokio::test]
 async fn refresh_rate_on_static_metric_returns_error() {
     let url = spawn(make_state()).await;
     let mut ws = connect(&url, Some("secret")).await;
