@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogMetric {
     pub id: String,
     pub name: String,
-    pub unit: String,
+    pub default_unit: String,
+    pub available_units: Vec<String>,
     pub r#static: bool,
 }
 
@@ -21,6 +21,8 @@ pub struct SubscribeEntry {
     pub id: String,
     #[serde(default)]
     pub refresh_rate_ms: Option<u64>,
+    #[serde(default)]
+    pub unit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,11 +33,18 @@ pub struct SubscribeMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricValue {
+    pub id: String,
+    pub value: f64,
+    pub unit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataMessage {
     #[serde(rename = "type")]
     pub msg_type: String,
     pub timestamp: u64,
-    pub values: HashMap<String, f64>,
+    pub metrics: Vec<MetricValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,8 +61,8 @@ impl CatalogMessage {
 }
 
 impl DataMessage {
-    pub fn new(timestamp: u64, values: HashMap<String, f64>) -> Self {
-        Self { msg_type: "data".to_string(), timestamp, values }
+    pub fn new(timestamp: u64, metrics: Vec<MetricValue>) -> Self {
+        Self { msg_type: "data".to_string(), timestamp, metrics }
     }
 }
 

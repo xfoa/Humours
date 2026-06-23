@@ -29,13 +29,30 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn is_static(&self, id: &str) -> bool {
-        self.catalog
-            .iter()
-            .find(|m| m.id == id)
-            .map(|m| m.r#static)
-            .unwrap_or(false)
+    pub fn catalog_entry(&self, id: &str) -> Option<&crate::protocol::CatalogMetric> {
+        self.catalog.iter().find(|m| m.id == id)
     }
+
+    pub fn is_static(&self, id: &str) -> bool {
+        self.catalog_entry(id).map(|m| m.r#static).unwrap_or(false)
+    }
+
+    pub fn default_unit(&self, id: &str) -> Option<String> {
+        self.catalog_entry(id).map(|m| m.default_unit.clone())
+    }
+
+    pub fn validate_unit(&self, id: &str, unit: &str) -> bool {
+        match self.catalog_entry(id) {
+            Some(m) => m.available_units.iter().any(|u| u == unit),
+            None => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Subscription {
+    rate: u64,
+    unit: String,
 }
 
 fn now_ms() -> u64 {
@@ -103,7 +120,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 
     let (out_tx, _rx0) = broadcast::channel::<Outgoing>(64);
-    let (sub_tx, sub_rx) = watch::channel(HashMap::<String, u64>::new());
+    let (sub_tx, sub_rx) = watch::channel(HashMap::<String, Subscription>::new());
 
     let poll_handle = tokio::spawn(poll_loop(state.clone(), out_tx.clone(), sub_rx));
     let send_out_tx = out_tx.clone();
@@ -153,9 +170,32 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     Ok(sub) => {
                         debug!("subscribe: {:?}", sub.metrics);
                         let mut map = HashMap::new();
-                        let mut static_ids: Vec<String> = Vec::new();
-                        let mut had_static_with_rate = false;
+                        let mut static_reqs: Vec<(String, String)> = Vec::new();
+                        let mut had_error = false;
                         for entry in sub.metrics {
+                            if state.catalog_entry(&entry.id).is_none() {
+                                let _ = out_tx.send(Outgoing::Error(Arc::new(ErrorMessage::new(
+                                    format!("unknown metric `{}`", entry.id),
+                                ))));
+                                had_error = true;
+                                continue;
+                            }
+                            let unit = match &entry.unit {
+                                Some(u) => {
+                                    if !state.validate_unit(&entry.id, u) {
+                                        let _ = out_tx.send(Outgoing::Error(Arc::new(ErrorMessage::new(
+                                            format!("unit `{}` is not valid for metric `{}`", u, entry.id),
+                                        ))));
+                                        had_error = true;
+                                        continue;
+                                    }
+                                    u.clone()
+                                }
+                                None => match state.default_unit(&entry.id) {
+                                    Some(u) => u,
+                                    None => String::new(),
+                                },
+                            };
                             if state.is_static(&entry.id) {
                                 if entry.refresh_rate_ms.is_some() {
                                     let _ = out_tx.send(Outgoing::Error(Arc::new(
@@ -164,30 +204,30 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             entry.id
                                         )),
                                     )));
-                                    had_static_with_rate = true;
+                                    had_error = true;
                                     continue;
                                 }
-                                static_ids.push(entry.id);
+                                static_reqs.push((entry.id, unit));
                             } else {
                                 let rate = entry
                                     .refresh_rate_ms
                                     .map(round_to_quantum)
                                     .unwrap_or_else(|| round_to_quantum(state.config.default_refresh_rate_ms));
-                                map.insert(entry.id, rate);
+                                map.insert(entry.id, Subscription { rate, unit });
                             }
                         }
-                        if had_static_with_rate {
+                        if had_error {
                             let _ = out_tx.send(Outgoing::Error(Arc::new(ErrorMessage::new(
-                                "subscribe rejected: refresh_rate_ms set on static metric(s)",
+                                "subscribe rejected due to previous error(s)",
                             ))));
                             continue;
                         }
-                        if !static_ids.is_empty() {
-                            let values = state.collector.sample_many(&static_ids);
-                            if !values.is_empty() {
+                        if !static_reqs.is_empty() {
+                            let metrics = state.collector.sample_many(&static_reqs);
+                            if !metrics.is_empty() {
                                 let _ = out_tx.send(Outgoing::Data(Arc::new(DataMessage::new(
                                     now_ms(),
-                                    values,
+                                    metrics,
                                 ))));
                             }
                         }
@@ -216,13 +256,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 async fn poll_loop(
     state: AppState,
     tx: broadcast::Sender<Outgoing>,
-    mut sub_rx: watch::Receiver<HashMap<String, u64>>,
+    mut sub_rx: watch::Receiver<HashMap<String, Subscription>>,
 ) {
     let quantum = state.config.poll_interval_ms.max(50);
     let mut tick = interval(Duration::from_millis(quantum));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    let mut current_subs: HashMap<String, u64> = HashMap::new();
+    let mut current_subs: HashMap<String, Subscription> = HashMap::new();
     let mut tick_count: u64 = 0;
     let mut force_sample = false;
 
@@ -242,11 +282,11 @@ async fn poll_loop(
             continue;
         }
 
-        let mut due: Vec<String> = Vec::new();
-        for (id, rate) in current_subs.iter() {
-            let ticks_per_sample = (*rate / quantum).max(1);
+        let mut due: Vec<(String, String)> = Vec::new();
+        for (id, sub) in current_subs.iter() {
+            let ticks_per_sample = (sub.rate / quantum).max(1);
             if force_sample || tick_count % ticks_per_sample == 0 {
-                due.push(id.clone());
+                due.push((id.clone(), sub.unit.clone()));
             }
         }
         force_sample = false;
@@ -256,13 +296,13 @@ async fn poll_loop(
             continue;
         }
 
-        let values = state.collector.sample_many(&due);
+        let metrics = state.collector.sample_many(&due);
 
-        if values.is_empty() {
+        if metrics.is_empty() {
             continue;
         }
 
-        let msg = Arc::new(DataMessage::new(now_ms(), values));
+        let msg = Arc::new(DataMessage::new(now_ms(), metrics));
         let _ = tx.send(Outgoing::Data(msg));
     }
 }

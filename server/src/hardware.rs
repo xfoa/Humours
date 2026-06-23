@@ -1,22 +1,24 @@
 use crate::protocol::CatalogMetric;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use sysinfo::{CpuRefreshKind, ProcessRefreshKind, RefreshKind, System};
 
 pub const POLL_QUANTUM_MS: u64 = 50;
 
+const MEMORY_UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "KiB", "MiB", "GiB", "TiB"];
+
 pub fn build_catalog() -> Vec<CatalogMetric> {
+    let mem_units: Vec<String> = MEMORY_UNITS.iter().map(|s| s.to_string()).collect();
     vec![
-        CatalogMetric { id: "cpu.usage".to_string(), name: "CPU Usage".to_string(), unit: "%".to_string(), r#static: false },
-        CatalogMetric { id: "cpu.cores".to_string(), name: "CPU Core Count".to_string(), unit: "cores".to_string(), r#static: true },
-        CatalogMetric { id: "mem.used".to_string(), name: "Memory Used".to_string(), unit: "GB".to_string(), r#static: false },
-        CatalogMetric { id: "mem.total".to_string(), name: "Memory Total".to_string(), unit: "GB".to_string(), r#static: true },
-        CatalogMetric { id: "mem.usage".to_string(), name: "Memory Usage".to_string(), unit: "%".to_string(), r#static: false },
-        CatalogMetric { id: "swap.used".to_string(), name: "Swap Used".to_string(), unit: "GB".to_string(), r#static: false },
-        CatalogMetric { id: "swap.total".to_string(), name: "Swap Total".to_string(), unit: "GB".to_string(), r#static: true },
-        CatalogMetric { id: "sys.uptime".to_string(), name: "System Uptime".to_string(), unit: "s".to_string(), r#static: false },
-        CatalogMetric { id: "sys.load1".to_string(), name: "Load Average (1m)".to_string(), unit: "".to_string(), r#static: false },
-        CatalogMetric { id: "proc.count".to_string(), name: "Process Count".to_string(), unit: "procs".to_string(), r#static: false },
+        CatalogMetric { id: "cpu.usage".to_string(), name: "CPU Usage".to_string(), default_unit: "%".to_string(), available_units: vec!["%".to_string()], r#static: false },
+        CatalogMetric { id: "cpu.cores".to_string(), name: "CPU Core Count".to_string(), default_unit: "cores".to_string(), available_units: vec!["cores".to_string()], r#static: true },
+        CatalogMetric { id: "mem.used".to_string(), name: "Memory Used".to_string(), default_unit: "GB".to_string(), available_units: mem_units.clone(), r#static: false },
+        CatalogMetric { id: "mem.total".to_string(), name: "Memory Total".to_string(), default_unit: "GB".to_string(), available_units: mem_units.clone(), r#static: true },
+        CatalogMetric { id: "mem.usage".to_string(), name: "Memory Usage".to_string(), default_unit: "%".to_string(), available_units: vec!["%".to_string()], r#static: false },
+        CatalogMetric { id: "swap.used".to_string(), name: "Swap Used".to_string(), default_unit: "GB".to_string(), available_units: mem_units.clone(), r#static: false },
+        CatalogMetric { id: "swap.total".to_string(), name: "Swap Total".to_string(), default_unit: "GB".to_string(), available_units: mem_units, r#static: true },
+        CatalogMetric { id: "sys.uptime".to_string(), name: "System Uptime".to_string(), default_unit: "s".to_string(), available_units: vec!["s".to_string(), "ms".to_string(), "m".to_string(), "h".to_string()], r#static: false },
+        CatalogMetric { id: "sys.load1".to_string(), name: "Load Average (1m)".to_string(), default_unit: "".to_string(), available_units: vec!["".to_string()], r#static: false },
+        CatalogMetric { id: "proc.count".to_string(), name: "Process Count".to_string(), default_unit: "procs".to_string(), available_units: vec!["procs".to_string()], r#static: false },
     ]
 }
 
@@ -27,6 +29,32 @@ pub fn round_to_quantum(ms: u64) -> u64 {
     let q = POLL_QUANTUM_MS;
     let rounded = ((ms + q - 1) / q) * q;
     rounded.max(q)
+}
+
+pub fn convert_bytes(bytes: f64, unit: &str) -> Option<f64> {
+    let base = match unit {
+        "B" => Some(1.0_f64),
+        "KB" => Some(1000.0),
+        "MB" => Some(1_000_000.0),
+        "GB" => Some(1_000_000_000.0),
+        "TB" => Some(1_000_000_000_000.0),
+        "KiB" => Some(1024.0),
+        "MiB" => Some(1024.0 * 1024.0),
+        "GiB" => Some(1024.0 * 1024.0 * 1024.0),
+        "TiB" => Some(1024.0 * 1024.0 * 1024.0 * 1024.0),
+        _ => None,
+    }?;
+    Some(bytes / base)
+}
+
+pub fn convert_seconds(seconds: f64, unit: &str) -> Option<f64> {
+    match unit {
+        "s" => Some(seconds),
+        "ms" => Some(seconds * 1000.0),
+        "m" => Some(seconds / 60.0),
+        "h" => Some(seconds / 3600.0),
+        _ => None,
+    }
 }
 
 pub struct Collector {
@@ -44,12 +72,10 @@ impl Collector {
         Self { sys: Arc::new(Mutex::new(sys)) }
     }
 
-    pub fn sample(&self, metric_id: &str) -> Option<f64> {
+    fn sample_raw(&self, metric_id: &str) -> Option<f64> {
         let mut sys = self.sys.lock().ok()?;
         sys.refresh_cpu_usage();
         sys.refresh_memory();
-
-        let bytes_to_gb = |b: u64| (b as f64) / 1024.0 / 1024.0 / 1024.0;
 
         match metric_id {
             "cpu.usage" => {
@@ -61,8 +87,8 @@ impl Collector {
                 Some(sum / cpus.len() as f64)
             }
             "cpu.cores" => Some(sys.cpus().len() as f64),
-            "mem.used" => Some(bytes_to_gb(sys.used_memory())),
-            "mem.total" => Some(bytes_to_gb(sys.total_memory())),
+            "mem.used" => Some(sys.used_memory() as f64),
+            "mem.total" => Some(sys.total_memory() as f64),
             "mem.usage" => {
                 let total = sys.total_memory() as f64;
                 if total == 0.0 {
@@ -71,26 +97,44 @@ impl Collector {
                     Some((sys.used_memory() as f64 / total) * 100.0)
                 }
             }
-            "swap.used" => Some(bytes_to_gb(sys.used_swap())),
-            "swap.total" => Some(bytes_to_gb(sys.total_swap())),
+            "swap.used" => Some(sys.used_swap() as f64),
+            "swap.total" => Some(sys.total_swap() as f64),
             "sys.uptime" => Some(sysinfo::System::uptime() as f64),
-            "sys.load1" => {
-                let load = System::load_average();
-                Some(load.one)
-            }
+            "sys.load1" => Some(System::load_average().one),
             "proc.count" => Some(sys.processes().len() as f64),
             _ => None,
         }
     }
 
-    pub fn sample_many(&self, ids: &[String]) -> HashMap<String, f64> {
-        let mut out = HashMap::with_capacity(ids.len());
-        for id in ids {
-            if let Some(v) = self.sample(id) {
-                out.insert(id.clone(), v);
+    pub fn sample(&self, metric_id: &str, unit: &str) -> Option<f64> {
+        let raw = self.sample_raw(metric_id)?;
+        if metric_id.starts_with("mem.") || metric_id.starts_with("swap.") {
+            convert_bytes(raw, unit)
+        } else if metric_id == "sys.uptime" {
+            convert_seconds(raw, unit)
+        } else {
+            if unit.is_empty() {
+                Some(raw)
+            } else {
+                Some(raw)
+            }
+        }
+    }
+
+    pub fn sample_many(
+        &self,
+        requests: &[(String, String)],
+    ) -> Vec<crate::protocol::MetricValue> {
+        let mut out = Vec::with_capacity(requests.len());
+        for (id, unit) in requests {
+            if let Some(value) = self.sample(id, unit) {
+                out.push(crate::protocol::MetricValue {
+                    id: id.clone(),
+                    value,
+                    unit: unit.clone(),
+                });
             }
         }
         out
     }
 }
-

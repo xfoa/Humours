@@ -1,11 +1,15 @@
 use futures_util::{SinkExt, StreamExt};
 use humours_server::config::Config;
 use humours_server::hardware::{build_catalog, round_to_quantum, Collector, POLL_QUANTUM_MS};
-use humours_server::protocol::{CatalogMessage, DataMessage, SubscribeMessage};
+use humours_server::protocol::{CatalogMessage, DataMessage, MetricValue, SubscribeMessage};
 use humours_server::server::{router, AppState};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
+
+fn find_metric<'a>(msg: &'a DataMessage, id: &str) -> Option<&'a MetricValue> {
+    msg.metrics.iter().find(|m| m.id == id)
+}
 
 fn make_state() -> AppState {
     let config = Config {
@@ -83,10 +87,12 @@ async fn subscribe_and_receive_data() {
             humours_server::protocol::SubscribeEntry {
                 id: "cpu.usage".to_string(),
                 refresh_rate_ms: Some(100),
+                unit: None,
             },
             humours_server::protocol::SubscribeEntry {
                 id: "mem.used".to_string(),
                 refresh_rate_ms: Some(100),
+                unit: None,
             },
         ],
     };
@@ -110,10 +116,10 @@ async fn subscribe_and_receive_data() {
         let msg: DataMessage = serde_json::from_str(&raw).unwrap();
         assert_eq!(msg.msg_type, "data");
         assert!(msg.timestamp > 0);
-        if msg.values.contains_key("cpu.usage") {
+        if find_metric(&msg, "cpu.usage").is_some() {
             got_cpu = true;
         }
-        if msg.values.contains_key("mem.used") {
+        if find_metric(&msg, "mem.used").is_some() {
             got_mem = true;
         }
         if got_cpu && got_mem {
@@ -135,6 +141,7 @@ async fn data_messages_only_contain_subscribed_metrics() {
         metrics: vec![humours_server::protocol::SubscribeEntry {
             id: "cpu.usage".to_string(),
             refresh_rate_ms: Some(100),
+            unit: None,
         }],
     };
     ws.send(Message::Text(serde_json::to_string(&sub).unwrap()))
@@ -154,9 +161,9 @@ async fn data_messages_only_contain_subscribed_metrics() {
         .unwrap();
         let msg: DataMessage = serde_json::from_str(&raw).unwrap();
         assert!(
-            msg.values.len() <= 1,
+            msg.metrics.len() <= 1,
             "expected only subscribed metrics, got {:?}",
-            msg.values
+            msg.metrics
         );
     }
 }
@@ -173,10 +180,12 @@ async fn static_metric_sent_once_on_subscribe() {
             humours_server::protocol::SubscribeEntry {
                 id: "cpu.cores".to_string(),
                 refresh_rate_ms: None,
+                unit: None,
             },
             humours_server::protocol::SubscribeEntry {
                 id: "cpu.usage".to_string(),
                 refresh_rate_ms: Some(50),
+                unit: None,
             },
         ],
     };
@@ -194,7 +203,7 @@ async fn static_metric_sent_once_on_subscribe() {
             _ => continue,
         };
         if let Ok(msg) = serde_json::from_str::<DataMessage>(&raw) {
-            if msg.values.contains_key("cpu.cores") {
+            if find_metric(&msg, "cpu.cores").is_some() {
                 cores_seen += 1;
             }
         }
@@ -216,6 +225,7 @@ async fn refresh_rate_on_static_metric_returns_error() {
         metrics: vec![humours_server::protocol::SubscribeEntry {
             id: "cpu.cores".to_string(),
             refresh_rate_ms: Some(100),
+            unit: None,
         }],
     };
     ws.send(Message::Text(serde_json::to_string(&sub).unwrap()))
@@ -275,6 +285,137 @@ async fn malformed_json_returns_error() {
 }
 
 #[tokio::test]
+async fn custom_unit_is_honored() {
+    let url = spawn(make_state()).await;
+    let mut ws = connect(&url, Some("secret")).await;
+    let _ = ws.next().await.unwrap();
+
+    let sub = SubscribeMessage {
+        msg_type: "subscribe".to_string(),
+        metrics: vec![humours_server::protocol::SubscribeEntry {
+            id: "mem.total".to_string(),
+            refresh_rate_ms: None,
+            unit: Some("MB".to_string()),
+        }],
+    };
+    ws.send(Message::Text(serde_json::to_string(&sub).unwrap()))
+        .await
+        .unwrap();
+
+    let mut got_value = false;
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(300) {
+        let raw = match tokio::time::timeout(std::time::Duration::from_millis(100), ws.next())
+            .await
+        {
+            Ok(Some(Ok(m))) => m.into_text().unwrap(),
+            _ => continue,
+        };
+        if let Ok(msg) = serde_json::from_str::<DataMessage>(&raw) {
+            if let Some(mv) = find_metric(&msg, "mem.total") {
+                // mem.total in MB should be in the hundreds-to-thousands range,
+                // not single-digit GB.
+                assert!(mv.value > 100.0, "mem.total in MB was {}, expected > 100", mv.value);
+                got_value = true;
+                break;
+            }
+        }
+    }
+    assert!(got_value, "never received mem.total with custom unit");
+}
+
+#[tokio::test]
+async fn data_message_includes_units() {
+    let url = spawn(make_state()).await;
+    let mut ws = connect(&url, Some("secret")).await;
+    let _ = ws.next().await.unwrap();
+
+    let sub = SubscribeMessage {
+        msg_type: "subscribe".to_string(),
+        metrics: vec![
+            humours_server::protocol::SubscribeEntry {
+                id: "mem.total".to_string(),
+                refresh_rate_ms: None,
+                unit: Some("MB".to_string()),
+            },
+            humours_server::protocol::SubscribeEntry {
+                id: "cpu.usage".to_string(),
+                refresh_rate_ms: Some(100),
+                unit: None,
+            },
+        ],
+    };
+    ws.send(Message::Text(serde_json::to_string(&sub).unwrap()))
+        .await
+        .unwrap();
+
+    let mut checked_mem = false;
+    let mut checked_cpu = false;
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(500) && !(checked_mem && checked_cpu) {
+        let raw = match tokio::time::timeout(std::time::Duration::from_millis(100), ws.next())
+            .await
+        {
+            Ok(Some(Ok(m))) => m.into_text().unwrap(),
+            _ => continue,
+        };
+        if let Ok(msg) = serde_json::from_str::<DataMessage>(&raw) {
+            if let Some(mv) = find_metric(&msg, "mem.total") {
+                assert_eq!(mv.unit, "MB");
+                assert!(mv.value > 100.0);
+                checked_mem = true;
+            }
+            if let Some(mv) = find_metric(&msg, "cpu.usage") {
+                assert_eq!(mv.unit, "%");
+                checked_cpu = true;
+            }
+        }
+    }
+    assert!(checked_mem, "never received mem.total");
+    assert!(checked_cpu, "never received cpu.usage");
+}
+
+#[tokio::test]
+async fn invalid_unit_returns_error() {
+    let url = spawn(make_state()).await;
+    let mut ws = connect(&url, Some("secret")).await;
+    let _ = ws.next().await.unwrap();
+
+    let sub = SubscribeMessage {
+        msg_type: "subscribe".to_string(),
+        metrics: vec![humours_server::protocol::SubscribeEntry {
+            id: "mem.total".to_string(),
+            refresh_rate_ms: None,
+            unit: Some("frobnicate".to_string()),
+        }],
+    };
+    ws.send(Message::Text(serde_json::to_string(&sub).unwrap()))
+        .await
+        .unwrap();
+
+    let mut got_error = false;
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(300) {
+        let raw = match tokio::time::timeout(std::time::Duration::from_millis(100), ws.next())
+            .await
+        {
+            Ok(Some(Ok(m))) => m.into_text().unwrap(),
+            _ => continue,
+        };
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        if v["type"] == "error" {
+            assert!(
+                v["message"].as_str().unwrap().contains("not valid"),
+                "unexpected error: {v}"
+            );
+            got_error = true;
+            break;
+        }
+    }
+    assert!(got_error, "expected error for invalid unit");
+}
+
+#[tokio::test]
 async fn sub_50ms_rate_fires_within_quantum_window() {
     let url = spawn(make_state()).await;
     let mut ws = connect(&url, Some("secret")).await;
@@ -286,6 +427,7 @@ async fn sub_50ms_rate_fires_within_quantum_window() {
         metrics: vec![humours_server::protocol::SubscribeEntry {
             id: "cpu.usage".to_string(),
             refresh_rate_ms: Some(1),
+            unit: None,
         }],
     };
     ws.send(Message::Text(serde_json::to_string(&sub).unwrap()))
