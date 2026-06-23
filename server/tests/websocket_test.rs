@@ -1,7 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
 use humours_server::config::Config;
 use humours_server::hardware::{build_catalog, round_to_quantum, Collector, POLL_QUANTUM_MS};
-use humours_server::protocol::{CatalogMessage, DataMessage, MetricValue, SubscribeMessage};
+use humours_server::protocol::{CatalogMessage, DataMessage, MetricDataType, MetricValue, SubscribeMessage};
 use humours_server::server::{router, AppState};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -60,6 +60,11 @@ async fn catalog_sent_on_connect() {
     let ids: Vec<_> = msg.metrics.iter().map(|m| m.id.clone()).collect();
     assert!(ids.contains(&"cpu.usage".to_string()));
     assert!(ids.contains(&"mem.used".to_string()));
+
+    let cores = msg.metrics.iter().find(|m| m.id == "cpu.cores").unwrap();
+    assert_eq!(cores.data_type, MetricDataType::Integer);
+    let cpu_usage = msg.metrics.iter().find(|m| m.id == "cpu.usage").unwrap();
+    assert_eq!(cpu_usage.data_type, MetricDataType::Float);
 }
 
 #[tokio::test]
@@ -315,7 +320,7 @@ async fn custom_unit_is_honored() {
             if let Some(mv) = find_metric(&msg, "mem.total") {
                 // mem.total in MB should be in the hundreds-to-thousands range,
                 // not single-digit GB.
-                assert!(mv.value > 100.0, "mem.total in MB was {}, expected > 100", mv.value);
+                assert!(mv.value.as_f64() > 100.0, "mem.total in MB was {}, expected > 100", mv.value.as_f64());
                 got_value = true;
                 break;
             }
@@ -362,7 +367,7 @@ async fn data_message_includes_units() {
         if let Ok(msg) = serde_json::from_str::<DataMessage>(&raw) {
             if let Some(mv) = find_metric(&msg, "mem.total") {
                 assert_eq!(mv.unit, "MB");
-                assert!(mv.value > 100.0);
+                assert!(mv.value.as_f64() > 100.0);
                 checked_mem = true;
             }
             if let Some(mv) = find_metric(&msg, "cpu.usage") {

@@ -7,6 +7,15 @@ pub struct CatalogMetric {
     pub default_unit: String,
     pub available_units: Vec<String>,
     pub r#static: bool,
+    pub data_type: MetricDataType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MetricDataType {
+    Float,
+    Integer,
+    Boolean,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,9 +42,51 @@ pub struct SubscribeMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MetricNumber {
+    Float(f64),
+    Integer(i64),
+    Boolean(bool),
+}
+
+impl From<f64> for MetricNumber {
+    fn from(v: f64) -> Self {
+        MetricNumber::Float(v)
+    }
+}
+
+impl From<i64> for MetricNumber {
+    fn from(v: i64) -> Self {
+        MetricNumber::Integer(v)
+    }
+}
+
+impl From<bool> for MetricNumber {
+    fn from(v: bool) -> Self {
+        MetricNumber::Boolean(v)
+    }
+}
+
+impl MetricNumber {
+    pub fn as_f64(&self) -> f64 {
+        match self {
+            MetricNumber::Float(v) => *v,
+            MetricNumber::Integer(v) => *v as f64,
+            MetricNumber::Boolean(v) => {
+                if *v {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricValue {
     pub id: String,
-    pub value: f64,
+    pub value: MetricNumber,
     pub unit: String,
 }
 

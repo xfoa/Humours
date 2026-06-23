@@ -1,4 +1,4 @@
-use crate::protocol::CatalogMetric;
+use crate::protocol::{CatalogMetric, MetricDataType, MetricNumber};
 use std::sync::{Arc, Mutex};
 use sysinfo::{CpuRefreshKind, ProcessRefreshKind, RefreshKind, System};
 
@@ -9,16 +9,16 @@ const MEMORY_UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "KiB", "MiB", "GiB"
 pub fn build_catalog() -> Vec<CatalogMetric> {
     let mem_units: Vec<String> = MEMORY_UNITS.iter().map(|s| s.to_string()).collect();
     vec![
-        CatalogMetric { id: "cpu.usage".to_string(), name: "CPU Usage".to_string(), default_unit: "%".to_string(), available_units: vec!["%".to_string()], r#static: false },
-        CatalogMetric { id: "cpu.cores".to_string(), name: "CPU Core Count".to_string(), default_unit: "cores".to_string(), available_units: vec!["cores".to_string()], r#static: true },
-        CatalogMetric { id: "mem.used".to_string(), name: "Memory Used".to_string(), default_unit: "GB".to_string(), available_units: mem_units.clone(), r#static: false },
-        CatalogMetric { id: "mem.total".to_string(), name: "Memory Total".to_string(), default_unit: "GB".to_string(), available_units: mem_units.clone(), r#static: true },
-        CatalogMetric { id: "mem.usage".to_string(), name: "Memory Usage".to_string(), default_unit: "%".to_string(), available_units: vec!["%".to_string()], r#static: false },
-        CatalogMetric { id: "swap.used".to_string(), name: "Swap Used".to_string(), default_unit: "GB".to_string(), available_units: mem_units.clone(), r#static: false },
-        CatalogMetric { id: "swap.total".to_string(), name: "Swap Total".to_string(), default_unit: "GB".to_string(), available_units: mem_units, r#static: true },
-        CatalogMetric { id: "sys.uptime".to_string(), name: "System Uptime".to_string(), default_unit: "s".to_string(), available_units: vec!["s".to_string(), "ms".to_string(), "m".to_string(), "h".to_string()], r#static: false },
-        CatalogMetric { id: "sys.load1".to_string(), name: "Load Average (1m)".to_string(), default_unit: "".to_string(), available_units: vec!["".to_string()], r#static: false },
-        CatalogMetric { id: "proc.count".to_string(), name: "Process Count".to_string(), default_unit: "procs".to_string(), available_units: vec!["procs".to_string()], r#static: false },
+        CatalogMetric { id: "cpu.usage".to_string(), name: "CPU Usage".to_string(), default_unit: "%".to_string(), available_units: vec!["%".to_string()], r#static: false, data_type: MetricDataType::Float },
+        CatalogMetric { id: "cpu.cores".to_string(), name: "CPU Core Count".to_string(), default_unit: "cores".to_string(), available_units: vec!["cores".to_string()], r#static: true, data_type: MetricDataType::Integer },
+        CatalogMetric { id: "mem.used".to_string(), name: "Memory Used".to_string(), default_unit: "GB".to_string(), available_units: mem_units.clone(), r#static: false, data_type: MetricDataType::Float },
+        CatalogMetric { id: "mem.total".to_string(), name: "Memory Total".to_string(), default_unit: "GB".to_string(), available_units: mem_units.clone(), r#static: true, data_type: MetricDataType::Integer },
+        CatalogMetric { id: "mem.usage".to_string(), name: "Memory Usage".to_string(), default_unit: "%".to_string(), available_units: vec!["%".to_string()], r#static: false, data_type: MetricDataType::Float },
+        CatalogMetric { id: "swap.used".to_string(), name: "Swap Used".to_string(), default_unit: "GB".to_string(), available_units: mem_units.clone(), r#static: false, data_type: MetricDataType::Float },
+        CatalogMetric { id: "swap.total".to_string(), name: "Swap Total".to_string(), default_unit: "GB".to_string(), available_units: mem_units, r#static: true, data_type: MetricDataType::Integer },
+        CatalogMetric { id: "sys.uptime".to_string(), name: "System Uptime".to_string(), default_unit: "s".to_string(), available_units: vec!["s".to_string(), "ms".to_string(), "m".to_string(), "h".to_string()], r#static: false, data_type: MetricDataType::Float },
+        CatalogMetric { id: "sys.load1".to_string(), name: "Load Average (1m)".to_string(), default_unit: "".to_string(), available_units: vec!["".to_string()], r#static: false, data_type: MetricDataType::Float },
+        CatalogMetric { id: "proc.count".to_string(), name: "Process Count".to_string(), default_unit: "procs".to_string(), available_units: vec!["procs".to_string()], r#static: false, data_type: MetricDataType::Integer },
     ]
 }
 
@@ -123,11 +123,16 @@ impl Collector {
 
     pub fn sample_many(
         &self,
-        requests: &[(String, String)],
+        requests: &[(String, String, MetricDataType)],
     ) -> Vec<crate::protocol::MetricValue> {
         let mut out = Vec::with_capacity(requests.len());
-        for (id, unit) in requests {
-            if let Some(value) = self.sample(id, unit) {
+        for (id, unit, dtype) in requests {
+            if let Some(raw) = self.sample(id, unit) {
+                let value = match dtype {
+                    MetricDataType::Integer => MetricNumber::Integer(raw as i64),
+                    MetricDataType::Boolean => MetricNumber::Boolean(raw != 0.0),
+                    MetricDataType::Float => MetricNumber::Float(raw),
+                };
                 out.push(crate::protocol::MetricValue {
                     id: id.clone(),
                     value,

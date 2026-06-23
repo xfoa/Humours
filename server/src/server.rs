@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::hardware::{round_to_quantum, Collector};
 use crate::protocol::{
-    CatalogMessage, DataMessage, ErrorMessage, SubscribeMessage,
+    CatalogMessage, DataMessage, ErrorMessage, MetricDataType, SubscribeMessage,
 };
 use axum::{
     extract::{
@@ -47,12 +47,19 @@ impl AppState {
             None => false,
         }
     }
+
+    pub fn data_type(&self, id: &str) -> MetricDataType {
+        self.catalog_entry(id)
+            .map(|m| m.data_type.clone())
+            .unwrap_or(MetricDataType::Float)
+    }
 }
 
 #[derive(Clone, Debug)]
 struct Subscription {
     rate: u64,
     unit: String,
+    data_type: MetricDataType,
 }
 
 fn now_ms() -> u64 {
@@ -170,7 +177,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     Ok(sub) => {
                         debug!("subscribe: {:?}", sub.metrics);
                         let mut map = HashMap::new();
-                        let mut static_reqs: Vec<(String, String)> = Vec::new();
+                        let mut static_reqs: Vec<(String, String, MetricDataType)> = Vec::new();
                         let mut had_error = false;
                         for entry in sub.metrics {
                             if state.catalog_entry(&entry.id).is_none() {
@@ -207,13 +214,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     had_error = true;
                                     continue;
                                 }
-                                static_reqs.push((entry.id, unit));
+                                let dtype = state.data_type(&entry.id);
+                                static_reqs.push((entry.id, unit, dtype.clone()));
                             } else {
                                 let rate = entry
                                     .refresh_rate_ms
                                     .map(round_to_quantum)
                                     .unwrap_or_else(|| round_to_quantum(state.config.default_refresh_rate_ms));
-                                map.insert(entry.id, Subscription { rate, unit });
+                                let dtype = state.data_type(&entry.id);
+                                map.insert(entry.id, Subscription { rate, unit, data_type: dtype });
                             }
                         }
                         if had_error {
@@ -282,11 +291,11 @@ async fn poll_loop(
             continue;
         }
 
-        let mut due: Vec<(String, String)> = Vec::new();
+        let mut due: Vec<(String, String, MetricDataType)> = Vec::new();
         for (id, sub) in current_subs.iter() {
             let ticks_per_sample = (sub.rate / quantum).max(1);
             if force_sample || tick_count % ticks_per_sample == 0 {
-                due.push((id.clone(), sub.unit.clone()));
+                due.push((id.clone(), sub.unit.clone(), sub.data_type.clone()));
             }
         }
         force_sample = false;
