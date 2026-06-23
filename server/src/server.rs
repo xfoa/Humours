@@ -152,74 +152,29 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 match parsed {
                     Ok(sub) => {
                         debug!("subscribe: {:?}", sub.metrics);
-                        let mut map = HashMap::new();
-                        let mut static_reqs: Vec<(String, String, MetricDataType)> = Vec::new();
-                        let mut had_error = false;
-                        let send_err = |tx: &broadcast::Sender<Outgoing>, msg: String| {
-                            let _ = tx.send(Outgoing::Error(Arc::new(ErrorMessage::new(msg))));
-                        };
-                        for entry in sub.metrics {
-                            let metric = match state.catalog_entry(&entry.id) {
-                                Some(m) => m,
-                                None => {
-                                    send_err(&out_tx, format!("unknown metric `{}`", entry.id));
-                                    had_error = true;
-                                    continue;
-                                }
-                            };
-                            let unit = match &entry.unit {
-                                Some(u) => {
-                                    if !metric.available_units.iter().any(|a| a == u) {
-                                        send_err(
-                                            &out_tx,
-                                            format!("unit `{}` is not valid for metric `{}`", u, entry.id),
-                                        );
-                                        had_error = true;
-                                        continue;
+                        match process_subscription(&state, &sub) {
+                            SubscriptionResult::Ok { map, static_reqs } => {
+                                if !static_reqs.is_empty() {
+                                    let metrics = state.collector.sample_many(&static_reqs);
+                                    if !metrics.is_empty() {
+                                        let _ = out_tx.send(Outgoing::Data(Arc::new(DataMessage::new(
+                                            now_ms(),
+                                            metrics,
+                                        ))));
                                     }
-                                    u.clone()
                                 }
-                                None => metric.default_unit.clone(),
-                            };
-                            if metric.r#static {
-                                if entry.refresh_rate_ms.is_some() {
-                                    send_err(
-                                        &out_tx,
-                                        format!(
-                                            "metric `{}` is static; refresh_rate_ms is not allowed",
-                                            entry.id
-                                        ),
-                                    );
-                                    had_error = true;
-                                    continue;
+                                if sub_tx.send(map).is_err() {
+                                    break;
                                 }
-                                static_reqs.push((entry.id, unit, metric.data_type));
-                            } else {
-                                let rate = entry
-                                    .refresh_rate_ms
-                                    .map(round_to_quantum)
-                                    .unwrap_or_else(|| round_to_quantum(state.config.default_refresh_rate_ms));
-                                map.insert(
-                                    entry.id,
-                                    Subscription { rate, unit, data_type: metric.data_type },
-                                );
                             }
-                        }
-                        if had_error {
-                            send_err(&out_tx, "subscribe rejected due to previous error(s)".to_string());
-                            continue;
-                        }
-                        if !static_reqs.is_empty() {
-                            let metrics = state.collector.sample_many(&static_reqs);
-                            if !metrics.is_empty() {
-                                let _ = out_tx.send(Outgoing::Data(Arc::new(DataMessage::new(
-                                    now_ms(),
-                                    metrics,
+                            SubscriptionResult::Errors(errors) => {
+                                for err in errors {
+                                    let _ = out_tx.send(Outgoing::Error(Arc::new(ErrorMessage::new(err))));
+                                }
+                                let _ = out_tx.send(Outgoing::Error(Arc::new(ErrorMessage::new(
+                                    "subscribe rejected due to previous error(s)",
                                 ))));
                             }
-                        }
-                        if sub_tx.send(map).is_err() {
-                            break;
                         }
                     }
                     Err(e) => {
@@ -238,6 +193,65 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     poll_handle.abort();
     send_handle.abort();
     info!("client disconnected");
+}
+
+enum SubscriptionResult {
+    Ok {
+        map: HashMap<String, Subscription>,
+        static_reqs: Vec<(String, String, MetricDataType)>,
+    },
+    Errors(Vec<String>),
+}
+
+fn process_subscription(
+    state: &AppState,
+    sub: &SubscribeMessage,
+) -> SubscriptionResult {
+    let mut map = HashMap::new();
+    let mut static_reqs: Vec<(String, String, MetricDataType)> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    for entry in &sub.metrics {
+        let metric = match state.catalog_entry(&entry.id) {
+            Some(m) => m,
+            None => {
+                errors.push(format!("unknown metric `{}`", entry.id));
+                continue;
+            }
+        };
+        let unit = match &entry.unit {
+            Some(u) => {
+                if !metric.available_units.iter().any(|a| a == u) {
+                    errors.push(format!("unit `{}` is not valid for metric `{}`", u, entry.id));
+                    continue;
+                }
+                u.clone()
+            }
+            None => metric.default_unit.clone(),
+        };
+        if metric.r#static {
+            if entry.refresh_rate_ms.is_some() {
+                errors.push(format!(
+                    "metric `{}` is static; refresh_rate_ms is not allowed",
+                    entry.id
+                ));
+                continue;
+            }
+            static_reqs.push((entry.id.clone(), unit, metric.data_type));
+        } else {
+            let rate = entry
+                .refresh_rate_ms
+                .map(round_to_quantum)
+                .unwrap_or_else(|| round_to_quantum(state.config.default_refresh_rate_ms));
+            map.insert(entry.id.clone(), Subscription { rate, unit, data_type: metric.data_type });
+        }
+    }
+
+    if errors.is_empty() {
+        SubscriptionResult::Ok { map, static_reqs }
+    } else {
+        SubscriptionResult::Errors(errors)
+    }
 }
 
 async fn poll_loop(

@@ -79,14 +79,14 @@ impl Collector {
     }
 
     fn refresh(&self) {
-        if let Ok(mut sys) = self.sys.lock() {
-            sys.refresh_cpu_usage();
-            sys.refresh_memory();
-        }
+        let mut sys = self.sys.lock().expect("Collector mutex poisoned");
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        sys.refresh_processes();
     }
 
     fn read_raw(&self, metric_id: &str) -> Option<f64> {
-        let sys = self.sys.lock().ok()?;
+        let sys = self.sys.lock().expect("Collector mutex poisoned");
         match metric_id {
             "cpu.usage" => {
                 let cpus = sys.cpus();

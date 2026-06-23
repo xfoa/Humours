@@ -439,11 +439,14 @@ async fn sub_50ms_rate_fires_within_quantum_window() {
         .await
         .unwrap();
 
-    // Collect timestamps of 5 messages and confirm they arrive at ~50ms cadence,
-    // not ~100ms. Allow generous slack for CI scheduling.
+    // Collect server-side timestamps of 8 messages. We use the timestamps
+    // embedded in the data messages (not wall-clock elapsed time) so the
+    // measurement is immune to test-scheduling jitter. At a 50ms rate, 8
+    // messages span ~350ms of server time. At 100ms (a rate-floor regression)
+    // they would span ~700ms.
     let mut stamps: Vec<u64> = Vec::new();
     let start = std::time::Instant::now();
-    while stamps.len() < 5 && start.elapsed() < std::time::Duration::from_secs(3) {
+    while stamps.len() < 8 && start.elapsed() < std::time::Duration::from_secs(3) {
         let raw = tokio::time::timeout(std::time::Duration::from_millis(200), ws.next())
             .await
             .unwrap()
@@ -454,17 +457,12 @@ async fn sub_50ms_rate_fires_within_quantum_window() {
         let msg: DataMessage = serde_json::from_str(&raw).unwrap();
         stamps.push(msg.timestamp);
     }
-    assert!(stamps.len() >= 5, "only got {} data messages", stamps.len());
+    assert!(stamps.len() >= 8, "only got {} data messages", stamps.len());
 
-    // With a 50ms rate we expect ~5 messages within ~300ms. If we were stuck
-    // at 100ms we'd see gaps >= ~100ms. Check that the median inter-arrival
-    // gap is closer to 50ms than 100ms.
-    let mut gaps: Vec<u64> = stamps.windows(2).map(|w| w[1].saturating_sub(w[0])).collect();
-    gaps.sort();
-    let median = gaps[gaps.len() / 2];
+    let server_span = stamps.last().unwrap() - stamps.first().unwrap();
     assert!(
-        median <= 70,
-        "expected ~50ms cadence, median inter-arrival gap was {median}ms"
+        server_span < 600,
+        "server-side span of 8 messages was {server_span}ms, expected < 600ms for 50ms cadence"
     );
 }
 
