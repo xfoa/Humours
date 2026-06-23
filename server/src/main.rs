@@ -35,10 +35,10 @@ async fn main() -> anyhow::Result<()> {
         let cert_path = config.tls_cert.as_ref().unwrap();
         let key_path = config.tls_key.as_ref().unwrap();
         tracing::info!("starting TLS server with provided cert at {addr}");
-        serve_tls(state.clone(), addr, cert_path, key_path).await?;
+        serve_tls(state, addr, cert_path, key_path).await?;
     } else {
         tracing::warn!("no TLS cert configured; generating self-signed certificate on the fly");
-        serve_self_signed(state.clone(), addr).await?;
+        serve_self_signed(state, addr).await?;
     }
 
     Ok(())

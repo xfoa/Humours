@@ -32,27 +32,6 @@ impl AppState {
     pub fn catalog_entry(&self, id: &str) -> Option<&crate::protocol::CatalogMetric> {
         self.catalog.iter().find(|m| m.id == id)
     }
-
-    pub fn is_static(&self, id: &str) -> bool {
-        self.catalog_entry(id).map(|m| m.r#static).unwrap_or(false)
-    }
-
-    pub fn default_unit(&self, id: &str) -> Option<String> {
-        self.catalog_entry(id).map(|m| m.default_unit.clone())
-    }
-
-    pub fn validate_unit(&self, id: &str, unit: &str) -> bool {
-        match self.catalog_entry(id) {
-            Some(m) => m.available_units.iter().any(|u| u == unit),
-            None => false,
-        }
-    }
-
-    pub fn data_type(&self, id: &str) -> MetricDataType {
-        self.catalog_entry(id)
-            .map(|m| m.data_type.clone())
-            .unwrap_or(MetricDataType::Float)
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +52,15 @@ fn now_ms() -> u64 {
 enum Outgoing {
     Data(Arc<DataMessage>),
     Error(Arc<ErrorMessage>),
+}
+
+impl Outgoing {
+    fn serialize(&self) -> Result<String, serde_json::Error> {
+        match self {
+            Outgoing::Data(m) => serde_json::to_string(m.as_ref()),
+            Outgoing::Error(m) => serde_json::to_string(m.as_ref()),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -136,23 +124,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         let mut rx = send_out_tx.subscribe();
         loop {
             match rx.recv().await {
-                Ok(Outgoing::Data(msg)) => {
-                    let text = match serde_json::to_string(msg.as_ref()) {
+                Ok(msg) => {
+                    let text = match msg.serialize() {
                         Ok(t) => t,
                         Err(e) => {
-                            warn!("serialize data: {e}");
-                            continue;
-                        }
-                    };
-                    if sink.send(Message::Text(text)).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(Outgoing::Error(msg)) => {
-                    let text = match serde_json::to_string(msg.as_ref()) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            warn!("serialize error: {e}");
+                            warn!("serialize outgoing: {e}");
                             continue;
                         }
                     };
@@ -179,56 +155,58 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let mut map = HashMap::new();
                         let mut static_reqs: Vec<(String, String, MetricDataType)> = Vec::new();
                         let mut had_error = false;
+                        let send_err = |tx: &broadcast::Sender<Outgoing>, msg: String| {
+                            let _ = tx.send(Outgoing::Error(Arc::new(ErrorMessage::new(msg))));
+                        };
                         for entry in sub.metrics {
-                            if state.catalog_entry(&entry.id).is_none() {
-                                let _ = out_tx.send(Outgoing::Error(Arc::new(ErrorMessage::new(
-                                    format!("unknown metric `{}`", entry.id),
-                                ))));
-                                had_error = true;
-                                continue;
-                            }
+                            let metric = match state.catalog_entry(&entry.id) {
+                                Some(m) => m,
+                                None => {
+                                    send_err(&out_tx, format!("unknown metric `{}`", entry.id));
+                                    had_error = true;
+                                    continue;
+                                }
+                            };
                             let unit = match &entry.unit {
                                 Some(u) => {
-                                    if !state.validate_unit(&entry.id, u) {
-                                        let _ = out_tx.send(Outgoing::Error(Arc::new(ErrorMessage::new(
+                                    if !metric.available_units.iter().any(|a| a == u) {
+                                        send_err(
+                                            &out_tx,
                                             format!("unit `{}` is not valid for metric `{}`", u, entry.id),
-                                        ))));
+                                        );
                                         had_error = true;
                                         continue;
                                     }
                                     u.clone()
                                 }
-                                None => match state.default_unit(&entry.id) {
-                                    Some(u) => u,
-                                    None => String::new(),
-                                },
+                                None => metric.default_unit.clone(),
                             };
-                            if state.is_static(&entry.id) {
+                            if metric.r#static {
                                 if entry.refresh_rate_ms.is_some() {
-                                    let _ = out_tx.send(Outgoing::Error(Arc::new(
-                                        ErrorMessage::new(format!(
+                                    send_err(
+                                        &out_tx,
+                                        format!(
                                             "metric `{}` is static; refresh_rate_ms is not allowed",
                                             entry.id
-                                        )),
-                                    )));
+                                        ),
+                                    );
                                     had_error = true;
                                     continue;
                                 }
-                                let dtype = state.data_type(&entry.id);
-                                static_reqs.push((entry.id, unit, dtype.clone()));
+                                static_reqs.push((entry.id, unit, metric.data_type));
                             } else {
                                 let rate = entry
                                     .refresh_rate_ms
                                     .map(round_to_quantum)
                                     .unwrap_or_else(|| round_to_quantum(state.config.default_refresh_rate_ms));
-                                let dtype = state.data_type(&entry.id);
-                                map.insert(entry.id, Subscription { rate, unit, data_type: dtype });
+                                map.insert(
+                                    entry.id,
+                                    Subscription { rate, unit, data_type: metric.data_type },
+                                );
                             }
                         }
                         if had_error {
-                            let _ = out_tx.send(Outgoing::Error(Arc::new(ErrorMessage::new(
-                                "subscribe rejected due to previous error(s)",
-                            ))));
+                            send_err(&out_tx, "subscribe rejected due to previous error(s)".to_string());
                             continue;
                         }
                         if !static_reqs.is_empty() {
@@ -294,8 +272,8 @@ async fn poll_loop(
         let mut due: Vec<(String, String, MetricDataType)> = Vec::new();
         for (id, sub) in current_subs.iter() {
             let ticks_per_sample = (sub.rate / quantum).max(1);
-            if force_sample || tick_count % ticks_per_sample == 0 {
-                due.push((id.clone(), sub.unit.clone(), sub.data_type.clone()));
+            if force_sample || tick_count.is_multiple_of(ticks_per_sample) {
+                due.push((id.clone(), sub.unit.clone(), sub.data_type));
             }
         }
         force_sample = false;

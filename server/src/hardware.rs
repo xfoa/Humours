@@ -27,7 +27,7 @@ pub fn round_to_quantum(ms: u64) -> u64 {
         return POLL_QUANTUM_MS;
     }
     let q = POLL_QUANTUM_MS;
-    let rounded = ((ms + q - 1) / q) * q;
+    let rounded = ms.div_ceil(q) * q;
     rounded.max(q)
 }
 
@@ -61,6 +61,12 @@ pub struct Collector {
     sys: Arc<Mutex<System>>,
 }
 
+impl Default for Collector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Collector {
     pub fn new() -> Self {
         let sys = System::new_with_specifics(
@@ -72,11 +78,15 @@ impl Collector {
         Self { sys: Arc::new(Mutex::new(sys)) }
     }
 
-    fn sample_raw(&self, metric_id: &str) -> Option<f64> {
-        let mut sys = self.sys.lock().ok()?;
-        sys.refresh_cpu_usage();
-        sys.refresh_memory();
+    fn refresh(&self) {
+        if let Ok(mut sys) = self.sys.lock() {
+            sys.refresh_cpu_usage();
+            sys.refresh_memory();
+        }
+    }
 
+    fn read_raw(&self, metric_id: &str) -> Option<f64> {
+        let sys = self.sys.lock().ok()?;
         match metric_id {
             "cpu.usage" => {
                 let cpus = sys.cpus();
@@ -107,39 +117,50 @@ impl Collector {
     }
 
     pub fn sample(&self, metric_id: &str, unit: &str) -> Option<f64> {
-        let raw = self.sample_raw(metric_id)?;
-        if metric_id.starts_with("mem.") || metric_id.starts_with("swap.") {
-            convert_bytes(raw, unit)
-        } else if metric_id == "sys.uptime" {
-            convert_seconds(raw, unit)
-        } else {
-            if unit.is_empty() {
-                Some(raw)
-            } else {
-                Some(raw)
-            }
-        }
+        self.refresh();
+        let raw = self.read_raw(metric_id)?;
+        self::convert_value(raw, metric_id, unit)
     }
 
     pub fn sample_many(
         &self,
         requests: &[(String, String, MetricDataType)],
     ) -> Vec<crate::protocol::MetricValue> {
+        if requests.is_empty() {
+            return Vec::new();
+        }
+        self.refresh();
         let mut out = Vec::with_capacity(requests.len());
         for (id, unit, dtype) in requests {
-            if let Some(raw) = self.sample(id, unit) {
-                let value = match dtype {
-                    MetricDataType::Integer => MetricNumber::Integer(raw as i64),
-                    MetricDataType::Boolean => MetricNumber::Boolean(raw != 0.0),
-                    MetricDataType::Float => MetricNumber::Float(raw),
-                };
-                out.push(crate::protocol::MetricValue {
-                    id: id.clone(),
-                    value,
-                    unit: unit.clone(),
-                });
-            }
+            let raw = match self.read_raw(id) {
+                Some(r) => r,
+                None => continue,
+            };
+            let converted = match self::convert_value(raw, id, unit) {
+                Some(v) => v,
+                None => continue,
+            };
+            let value = match dtype {
+                MetricDataType::Integer => MetricNumber::Integer(converted as i64),
+                MetricDataType::Boolean => MetricNumber::Boolean(converted != 0.0),
+                MetricDataType::Float => MetricNumber::Float(converted),
+            };
+            out.push(crate::protocol::MetricValue {
+                id: id.clone(),
+                value,
+                unit: unit.clone(),
+            });
         }
         out
+    }
+}
+
+fn convert_value(raw: f64, metric_id: &str, unit: &str) -> Option<f64> {
+    if metric_id.starts_with("mem.") || metric_id.starts_with("swap.") {
+        convert_bytes(raw, unit)
+    } else if metric_id == "sys.uptime" {
+        convert_seconds(raw, unit)
+    } else {
+        Some(raw)
     }
 }
