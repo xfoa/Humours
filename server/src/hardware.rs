@@ -33,7 +33,11 @@ pub fn build_catalog() -> Vec<CatalogMetric> {
     vec![
         catalog_metric("cpu.usage", "CPU Usage", "%", &["%"], false, MetricDataType::Float),
         catalog_metric("cpu.core_usage", "CPU Core Usage (per-core)", "%", &["%"], false, MetricDataType::StringList),
-        catalog_metric("cpu.cores", "CPU Core Count", "cores", &["cores"], true, MetricDataType::Integer),
+        catalog_metric("cpu.freq", "CPU Frequency (average)", "MHz", &["MHz", "GHz"], false, MetricDataType::Float),
+        catalog_metric("cpu.core_freq", "CPU Core Frequency (per-core)", "MHz", &["MHz", "GHz"], false, MetricDataType::StringList),
+        catalog_metric("cpu.cores", "CPU Core Count (logical)", "cores", &["cores"], true, MetricDataType::Integer),
+        catalog_metric("cpu.physical_cores", "CPU Core Count (physical)", "cores", &["cores"], true, MetricDataType::Integer),
+        catalog_metric("cpu.brand", "CPU Model", "", &[""], true, MetricDataType::String),
         catalog_metric("cpu.temp", "CPU Temperature (average)", "C", TEMP_UNITS, false, MetricDataType::Float),
         catalog_metric("cpu.temp_max", "CPU Temperature (max)", "C", TEMP_UNITS, false, MetricDataType::Float),
         catalog_metric("cpu.temps", "CPU Temperatures (per-component)", "C", TEMP_UNITS, false, MetricDataType::StringList),
@@ -69,6 +73,11 @@ pub fn build_catalog() -> Vec<CatalogMetric> {
         catalog_metric("battery.state", "Battery State", "", &[""], false, MetricDataType::String),
         catalog_metric("battery.charge", "Battery Charge", "%", &["%"], false, MetricDataType::Float),
         catalog_metric("battery.voltage", "Battery Voltage", "V", &["V", "mV"], false, MetricDataType::Float),
+        catalog_metric("os.name", "Operating System", "", &[""], true, MetricDataType::String),
+        catalog_metric("os.version", "OS Version", "", &[""], true, MetricDataType::String),
+        catalog_metric("os.kernel", "Kernel Version", "", &[""], true, MetricDataType::String),
+        catalog_metric("os.hostname", "Hostname", "", &[""], false, MetricDataType::String),
+        catalog_metric("sys.arch", "System Architecture", "", &[""], true, MetricDataType::String),
     ]
 }
 
@@ -161,7 +170,11 @@ impl Collector {
     pub fn new() -> Self {
         let sys = System::new_with_specifics(
             RefreshKind::nothing()
-                .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
+                .with_cpu(
+                    CpuRefreshKind::nothing()
+                        .with_cpu_usage()
+                        .with_frequency(),
+                )
                 .with_memory(sysinfo::MemoryRefreshKind::nothing().with_ram().with_swap())
                 .with_processes(ProcessRefreshKind::nothing()),
         );
@@ -335,6 +348,16 @@ impl Collector {
                 }
             }
             "cpu.cores" => Some(sys.cpus().len() as f64),
+            "cpu.physical_cores" => System::physical_core_count().map(|n| n as f64),
+            "cpu.freq" => {
+                let cpus = sys.cpus();
+                if cpus.is_empty() {
+                    None
+                } else {
+                    let sum: f64 = cpus.iter().map(|c| c.frequency() as f64).sum();
+                    Some(sum / cpus.len() as f64)
+                }
+            }
             "cpu.temp" => {
                 drop(sys);
                 let components = self.components.lock().expect("Collector mutex poisoned");
@@ -382,6 +405,21 @@ impl Collector {
                         cpus.iter()
                             .enumerate()
                             .map(|(i, c)| format!("{}:{:.2}", i, c.cpu_usage() as f64))
+                            .collect(),
+                    )
+                }
+            }
+            "cpu.core_freq" => {
+                let sys = self.sys.lock().expect("Collector mutex poisoned");
+                let cpus = sys.cpus();
+                if cpus.is_empty() {
+                    None
+                } else {
+                    let scale = convert_frequency(1.0, unit).unwrap_or(1.0);
+                    Some(
+                        cpus.iter()
+                            .enumerate()
+                            .map(|(i, c)| format!("{}:{:.2}", i, c.frequency() as f64 * scale))
                             .collect(),
                     )
                 }
@@ -488,6 +526,20 @@ impl Collector {
             "battery.state" => {
                 primary_battery().map(|b| b.state().to_string())
             }
+            "cpu.brand" => {
+                let sys = self.sys.lock().expect("Collector mutex poisoned");
+                let cpus = sys.cpus();
+                if cpus.is_empty() {
+                    None
+                } else {
+                    Some(cpus[0].brand().to_string())
+                }
+            }
+            "os.name" => System::name(),
+            "os.version" => System::os_version(),
+            "os.kernel" => System::kernel_version(),
+            "os.hostname" => System::host_name(),
+            "sys.arch" => Some(System::cpu_arch()),
             "net.default_gateway" => {
                 let mut cache = self.gateway_cache.lock().expect("Collector mutex poisoned");
                 let ttl = Duration::from_secs(30);
@@ -586,6 +638,14 @@ fn convert_voltage(volts: f64, unit: &str) -> Option<f64> {
     }
 }
 
+fn convert_frequency(mhz: f64, unit: &str) -> Option<f64> {
+    match unit {
+        "MHz" | "" => Some(mhz),
+        "GHz" => Some(mhz / 1000.0),
+        _ => None,
+    }
+}
+
 fn convert_bytes_per_sec(bytes_per_sec: f64, unit: &str) -> Option<f64> {
     let stripped = unit.strip_suffix("/s")?;
     let base = byte_multiplier(stripped)?;
@@ -606,6 +666,8 @@ fn convert_value(raw: f64, metric_id: &str, unit: &str) -> Option<f64> {
         convert_temperature(raw, unit)
     } else if metric_id == "battery.voltage" {
         convert_voltage(raw, unit)
+    } else if metric_id == "cpu.freq" {
+        convert_frequency(raw, unit)
     } else {
         Some(raw)
     }
