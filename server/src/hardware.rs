@@ -2,7 +2,9 @@ use crate::protocol::{CatalogMetric, MetricDataType, MetricNumber};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use sysinfo::{CpuRefreshKind, Disks, Networks, ProcessRefreshKind, RefreshKind, System};
+use sysinfo::{Components, CpuRefreshKind, Disks, Networks, ProcessRefreshKind, RefreshKind, System};
+
+const TEMP_UNITS: &[&str] = &["C", "F"];
 
 pub const POLL_QUANTUM_MS: u64 = 50;
 
@@ -30,7 +32,11 @@ fn catalog_metric(
 pub fn build_catalog() -> Vec<CatalogMetric> {
     vec![
         catalog_metric("cpu.usage", "CPU Usage", "%", &["%"], false, MetricDataType::Float),
+        catalog_metric("cpu.core_usage", "CPU Core Usage (per-core)", "%", &["%"], false, MetricDataType::StringList),
         catalog_metric("cpu.cores", "CPU Core Count", "cores", &["cores"], true, MetricDataType::Integer),
+        catalog_metric("cpu.temp", "CPU Temperature (average)", "C", TEMP_UNITS, false, MetricDataType::Float),
+        catalog_metric("cpu.temp_max", "CPU Temperature (max)", "C", TEMP_UNITS, false, MetricDataType::Float),
+        catalog_metric("cpu.temps", "CPU Temperatures (per-component)", "C", TEMP_UNITS, false, MetricDataType::StringList),
         catalog_metric("mem.used", "Memory Used", "GB", MEMORY_UNITS, false, MetricDataType::Float),
         catalog_metric("mem.total", "Memory Total", "GB", MEMORY_UNITS, true, MetricDataType::Integer),
         catalog_metric("mem.usage", "Memory Usage", "%", &["%"], false, MetricDataType::Float),
@@ -60,6 +66,9 @@ pub fn build_catalog() -> Vec<CatalogMetric> {
         catalog_metric("disk.used", "Disk Used Space", "GB", MEMORY_UNITS, false, MetricDataType::Float),
         catalog_metric("disk.available", "Disk Available Space", "GB", MEMORY_UNITS, false, MetricDataType::Float),
         catalog_metric("disk.usage", "Disk Usage", "%", &["%"], false, MetricDataType::Float),
+        catalog_metric("battery.state", "Battery State", "", &[""], false, MetricDataType::String),
+        catalog_metric("battery.charge", "Battery Charge", "%", &["%"], false, MetricDataType::Float),
+        catalog_metric("battery.voltage", "Battery Voltage", "V", &["V", "mV"], false, MetricDataType::Float),
     ]
 }
 
@@ -135,6 +144,7 @@ pub struct Collector {
     sys: Arc<Mutex<System>>,
     disks: Arc<Mutex<Disks>>,
     networks: Arc<Mutex<Networks>>,
+    components: Arc<Mutex<Components>>,
     net_state: Arc<Mutex<NetState>>,
     gateway_cache: Arc<Mutex<Option<(String, Instant)>>>,
     wifi_cache: Arc<Mutex<Option<(Vec<String>, Instant)>>>,
@@ -159,6 +169,7 @@ impl Collector {
             sys: Arc::new(Mutex::new(sys)),
             disks: Arc::new(Mutex::new(Disks::new_with_refreshed_list())),
             networks: Arc::new(Mutex::new(Networks::new_with_refreshed_list())),
+            components: Arc::new(Mutex::new(Components::new_with_refreshed_list())),
             net_state: Arc::new(Mutex::new(NetState::new())),
             gateway_cache: Arc::new(Mutex::new(None)),
             wifi_cache: Arc::new(Mutex::new(None)),
@@ -191,6 +202,10 @@ impl Collector {
 
     fn needs_networks(id: &str) -> bool {
         id.starts_with("net.")
+    }
+
+    fn needs_components(id: &str) -> bool {
+        id == "cpu.temp" || id == "cpu.temp_max" || id == "cpu.temps"
     }
 
     fn refresh_networks(&self) {
@@ -262,6 +277,7 @@ impl Collector {
         let want_sys_load = ids.iter().any(|i| Self::needs_sys_load(i));
         let want_disks = ids.iter().any(|i| Self::needs_disks(i));
         let want_net = ids.iter().any(|i| Self::needs_networks(i));
+        let want_components = ids.iter().any(|i| Self::needs_components(i));
 
         if want_cpu || want_mem || want_procs || want_sys_load {
             let mut sys = self.sys.lock().expect("Collector mutex poisoned");
@@ -279,6 +295,10 @@ impl Collector {
             let mut disks = self.disks.lock().expect("Collector mutex poisoned");
             disks.refresh(true);
         }
+        if want_components {
+            let mut components = self.components.lock().expect("Collector mutex poisoned");
+            components.refresh(true);
+        }
         if want_net {
             self.refresh_networks();
         }
@@ -288,6 +308,18 @@ impl Collector {
         match metric_id {
             "sys.load5" => return Some(System::load_average().five),
             "sys.load15" => return Some(System::load_average().fifteen),
+            "battery.charge" => {
+                return primary_battery().map(|b| {
+                    use battery::units::ratio::percent;
+                    b.state_of_charge().get::<percent>() as f64
+                });
+            }
+            "battery.voltage" => {
+                return primary_battery().map(|b| {
+                    use battery::units::electric_potential::volt;
+                    b.voltage().get::<volt>() as f64
+                });
+            }
             _ => {}
         }
 
@@ -303,6 +335,16 @@ impl Collector {
                 }
             }
             "cpu.cores" => Some(sys.cpus().len() as f64),
+            "cpu.temp" => {
+                drop(sys);
+                let components = self.components.lock().expect("Collector mutex poisoned");
+                cpu_temp_average(&components).map(|t| t as f64)
+            }
+            "cpu.temp_max" => {
+                drop(sys);
+                let components = self.components.lock().expect("Collector mutex poisoned");
+                cpu_temp_max(&components).map(|t| t as f64)
+            }
             "mem.used" => Some(sys.used_memory() as f64),
             "mem.total" => Some(sys.total_memory() as f64),
             "mem.usage" => {
@@ -325,32 +367,34 @@ impl Collector {
     pub fn sample(&self, metric_id: &str, unit: &str) -> Option<f64> {
         self.refresh_for(&[metric_id.to_string()]);
         let raw = self.read_raw(metric_id)?;
-        self::convert_value(raw, metric_id, unit)
-    }
-
-    fn read_string(&self, metric_id: &str) -> Option<String> {
-        match metric_id {
-            "net.default_gateway" => {
-                let mut cache = self.gateway_cache.lock().expect("Collector mutex poisoned");
-                let ttl = Duration::from_secs(30);
-                if let Some((ref val, ref at)) = *cache {
-                    if at.elapsed() < ttl {
-                        return Some(val.clone());
-                    }
-                }
-                let val = match default_net::get_default_gateway() {
-                    Ok(g) => g.ip_addr.to_string(),
-                    Err(_) => return None,
-                };
-                *cache = Some((val.clone(), Instant::now()));
-                Some(val)
-            }
-            _ => None,
-        }
+        self::convert_value(raw, metric_id, unit).map(round2)
     }
 
     fn read_string_list(&self, metric_id: &str, unit: &str) -> Option<Vec<String>> {
         match metric_id {
+            "cpu.core_usage" => {
+                let sys = self.sys.lock().expect("Collector mutex poisoned");
+                let cpus = sys.cpus();
+                if cpus.is_empty() {
+                    None
+                } else {
+                    Some(
+                        cpus.iter()
+                            .enumerate()
+                            .map(|(i, c)| format!("{}:{:.2}", i, c.cpu_usage() as f64))
+                            .collect(),
+                    )
+                }
+            }
+            "cpu.temps" => {
+                let components = self.components.lock().expect("Collector mutex poisoned");
+                let mut out: Vec<String> = Vec::new();
+                for (label, t) in cpu_temps(&components) {
+                    let scaled = convert_temperature(t as f64, unit).unwrap_or(t as f64);
+                    out.push(format!("{}:{:.2}", label, scaled));
+                }
+                Some(out)
+            }
             "net.interfaces" => {
                 let networks = self.networks.lock().expect("Collector mutex poisoned");
                 let mut names: Vec<String> = networks.list().keys().map(|s| s.to_string()).collect();
@@ -409,7 +453,7 @@ impl Collector {
                     } else {
                         raw
                     };
-                    out.push(format!("{}:{}", name, scaled));
+                    out.push(format!("{}:{:.2}", name, scaled));
                 }
                 Some(out)
             }
@@ -431,9 +475,33 @@ impl Collector {
                     } else {
                         *v
                     };
-                    out.push(format!("{}:{}", k, scaled));
+                    out.push(format!("{}:{:.2}", k, scaled));
                 }
                 Some(out)
+            }
+            _ => None,
+        }
+    }
+
+    fn read_string(&self, metric_id: &str) -> Option<String> {
+        match metric_id {
+            "battery.state" => {
+                primary_battery().map(|b| b.state().to_string())
+            }
+            "net.default_gateway" => {
+                let mut cache = self.gateway_cache.lock().expect("Collector mutex poisoned");
+                let ttl = Duration::from_secs(30);
+                if let Some((ref val, ref at)) = *cache {
+                    if at.elapsed() < ttl {
+                        return Some(val.clone());
+                    }
+                }
+                let val = match default_net::get_default_gateway() {
+                    Ok(g) => g.ip_addr.to_string(),
+                    Err(_) => return None,
+                };
+                *cache = Some((val.clone(), Instant::now()));
+                Some(val)
             }
             _ => None,
         }
@@ -485,7 +553,7 @@ impl Collector {
                     let value = match dtype {
                         MetricDataType::Integer => MetricNumber::Integer(converted as i64),
                         MetricDataType::Boolean => MetricNumber::Boolean(converted != 0.0),
-                        MetricDataType::Float => MetricNumber::Float(converted),
+                        MetricDataType::Float => MetricNumber::Float(round2(converted)),
                         MetricDataType::String | MetricDataType::StringList => unreachable!(),
                     };
                     out.push(crate::protocol::MetricValue {
@@ -497,6 +565,24 @@ impl Collector {
             }
         }
         out
+    }
+}
+
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
+fn primary_battery() -> Option<battery::Battery> {
+    let manager = battery::Manager::new().ok()?;
+    let mut batteries = manager.batteries().ok()?;
+    batteries.next()?.ok()
+}
+
+fn convert_voltage(volts: f64, unit: &str) -> Option<f64> {
+    match unit {
+        "V" | "" => Some(volts),
+        "mV" => Some(volts * 1000.0),
+        _ => None,
     }
 }
 
@@ -516,9 +602,78 @@ fn convert_value(raw: f64, metric_id: &str, unit: &str) -> Option<f64> {
         convert_bytes(raw, unit)
     } else if metric_id == "sys.uptime" {
         convert_seconds(raw, unit)
+    } else if metric_id == "cpu.temp" || metric_id == "cpu.temp_max" {
+        convert_temperature(raw, unit)
+    } else if metric_id == "battery.voltage" {
+        convert_voltage(raw, unit)
     } else {
         Some(raw)
     }
+}
+
+fn convert_temperature(celsius: f64, unit: &str) -> Option<f64> {
+    match unit {
+        "C" | "" => Some(celsius),
+        "F" => Some(celsius * 9.0 / 5.0 + 32.0),
+        _ => None,
+    }
+}
+
+fn is_cpu_component(label: &str) -> bool {
+    let l = label.to_ascii_lowercase();
+    l.contains("core")
+        || l.contains("cpu")
+        || l.contains("package")
+        || l.contains("tctl")
+        || l.contains("k10temp")
+        || l.contains("coretemp")
+}
+
+fn normalize_label(label: &str) -> String {
+    let trimmed = label.trim();
+    // On Linux, sysinfo composes component labels as `{chipname} {sensor}`
+    // (e.g. "coretemp Core 2", "thinkpad CPU"). The chip name is redundant, so
+    // drop the first whitespace-delimited token. On macOS/Windows the labels are
+    // already descriptive (e.g. "PECI CPU", "CPU Proximity", "Computer") and must
+    // be kept intact.
+    #[cfg(target_os = "linux")]
+    {
+        match trimmed.split_once(char::is_whitespace) {
+            Some((_, rest)) if !rest.trim().is_empty() => return rest.trim().to_string(),
+            _ => {}
+        }
+    }
+    trimmed.to_string()
+}
+
+fn cpu_temps(components: &Components) -> Vec<(String, f32)> {
+    components
+        .list()
+        .iter()
+        .filter_map(|c| {
+            if !is_cpu_component(c.label()) {
+                return None;
+            }
+            c.temperature().map(|t| (normalize_label(c.label()), t))
+        })
+        .collect()
+}
+
+fn cpu_temp_average(components: &Components) -> Option<f32> {
+    let temps = cpu_temps(components);
+    if temps.is_empty() {
+        None
+    } else {
+        let sum: f32 = temps.iter().map(|(_, t)| *t).sum();
+        Some(sum / temps.len() as f32)
+    }
+}
+
+fn cpu_temp_max(components: &Components) -> Option<f32> {
+    cpu_temps(components)
+        .into_iter()
+        .map(|(_, t)| t)
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
 }
 
 fn run_capture(cmd: &mut std::process::Command) -> Option<String> {
