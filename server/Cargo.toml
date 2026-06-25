@@ -27,7 +27,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustls-pemfile = "2"
 anyhow = "1"
 dirs = "6.0.0"
-rcgen = "0.14.8"
 futures-util = "0.3"
 default-net = "0.22"
 route_manager = "0.2"
@@ -41,4 +40,4 @@ futures-util = "0.3"
 tokio = { version = "1", features = ["full", "test-util"] }
 
 [patch.crates-io]
-all-smi = { path = "../vendor/all-smi" }
+all-smi = { path = "vendor/all-smi" }

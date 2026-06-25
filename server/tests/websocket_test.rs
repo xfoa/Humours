@@ -20,14 +20,11 @@ fn make_state() -> AppState {
         auth_token: "secret".to_string(),
         default_refresh_rate_ms: 100,
         poll_interval_ms: 50,
+        broadcast_buffer: 256,
     };
     let catalog = build_catalog();
     let collector = Arc::new(Collector::new());
-    AppState {
-        config: Arc::new(config),
-        catalog: Arc::new(catalog),
-        collector,
-    }
+    AppState::new(Arc::new(config), catalog, collector)
 }
 
 async fn spawn(state: AppState) -> String {

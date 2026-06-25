@@ -11,6 +11,7 @@ port = 8443
 auth_token = \"changeme\"
 default_refresh_rate_ms = 500
 poll_interval_ms = 50
+broadcast_buffer = 256
 ";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -24,6 +25,8 @@ pub struct Config {
     pub default_refresh_rate_ms: u64,
     #[serde(default = "default_poll")]
     pub poll_interval_ms: u64,
+    #[serde(default = "default_broadcast_buffer")]
+    pub broadcast_buffer: usize,
 }
 
 fn default_refresh() -> u64 {
@@ -31,6 +34,9 @@ fn default_refresh() -> u64 {
 }
 fn default_poll() -> u64 {
     50
+}
+fn default_broadcast_buffer() -> usize {
+    256
 }
 
 #[derive(Debug, Parser)]

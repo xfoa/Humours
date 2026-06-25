@@ -225,13 +225,6 @@ impl Collector {
         id.starts_with("proc.")
     }
 
-    fn needs_sys_load(id: &str) -> bool {
-        id == "sys.uptime"
-            || id == "sys.load1"
-            || id == "sys.load5"
-            || id == "sys.load15"
-    }
-
     fn needs_disks(id: &str) -> bool {
         id.starts_with("disk.")
     }
@@ -322,14 +315,13 @@ impl Collector {
         let want_cpu = ids.iter().any(|i| Self::needs_cpu(i));
         let want_mem = ids.iter().any(|i| Self::needs_mem(i));
         let want_procs = ids.iter().any(|i| Self::needs_procs(i));
-        let want_sys_load = ids.iter().any(|i| Self::needs_sys_load(i));
         let want_disks = ids.iter().any(|i| Self::needs_disks(i));
         let want_net = ids.iter().any(|i| Self::needs_networks(i));
         let want_components = ids.iter().any(|i| Self::needs_components(i));
         let want_gpus = ids.iter().any(|i| Self::needs_gpus(i));
         let _ = want_gpus;
 
-        if want_cpu || want_mem || want_procs || want_sys_load {
+        if want_cpu || want_mem || want_procs {
             let mut sys = self.sys.lock().expect("Collector mutex poisoned");
             if want_cpu {
                 sys.refresh_cpu_usage();
@@ -358,6 +350,10 @@ impl Collector {
         match metric_id {
             "sys.load5" => return Some(System::load_average().five),
             "sys.load15" => return Some(System::load_average().fifteen),
+            "net.iface_count" => {
+                let networks = self.networks.lock().expect("Collector mutex poisoned");
+                return Some(networks.list().len() as f64);
+            }
             "battery.charge" => {
                 return primary_battery().map(|b| {
                     use battery::units::ratio::percent;
@@ -464,6 +460,31 @@ impl Collector {
             "sys.uptime" => Some(sysinfo::System::uptime() as f64),
             "sys.load1" => Some(System::load_average().one),
             "proc.count" => Some(sys.processes().len() as f64),
+            "disk.count" => {
+                drop(sys);
+                let disks = self.disks.lock().expect("Collector mutex poisoned");
+                Some(disks.len() as f64)
+            }
+            "disk.total" | "disk.used" | "disk.available" | "disk.usage" => {
+                drop(sys);
+                let disks = self.disks.lock().expect("Collector mutex poisoned");
+                let total: u64 = disks.iter().map(|d| d.total_space()).sum();
+                let used: u64 = disks.iter().map(|d| d.total_space() - d.available_space()).sum();
+                let avail: u64 = disks.iter().map(|d| d.available_space()).sum();
+                match metric_id {
+                    "disk.total" => Some(total as f64),
+                    "disk.used" => Some(used as f64),
+                    "disk.available" => Some(avail as f64),
+                    "disk.usage" => {
+                        if total == 0 {
+                            None
+                        } else {
+                            Some((used as f64 / total as f64) * 100.0)
+                        }
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -883,29 +904,21 @@ fn convert_bytes_per_sec(bytes_per_sec: f64, unit: &str) -> Option<f64> {
 }
 
 fn convert_value(raw: f64, metric_id: &str, unit: &str) -> Option<f64> {
-    if metric_id.starts_with("mem.")
-        || metric_id.starts_with("swap.")
-        || metric_id == "disk.total"
-        || metric_id == "disk.used"
-        || metric_id == "disk.available"
-        || metric_id == "gpu.mem_used"
-        || metric_id == "gpu.mem_total"
-    {
-        convert_bytes(raw, unit)
-    } else if metric_id == "sys.uptime" {
-        convert_seconds(raw, unit)
-    } else if metric_id == "cpu.temp"
-        || metric_id == "cpu.temp_max"
-        || metric_id == "gpu.temp"
-        || metric_id == "gpu.temp_max"
-    {
-        convert_temperature(raw, unit)
-    } else if metric_id == "battery.voltage" {
-        convert_voltage(raw, unit)
-    } else if metric_id == "cpu.freq" || metric_id == "gpu.freq" {
-        convert_frequency(raw, unit)
-    } else {
-        Some(raw)
+    match metric_id {
+        m if m.starts_with("mem.")
+            || m.starts_with("swap.")
+            || m == "disk.total"
+            || m == "disk.used"
+            || m == "disk.available"
+            || m == "gpu.mem_used"
+            || m == "gpu.mem_total" => convert_bytes(raw, unit),
+        "sys.uptime" => convert_seconds(raw, unit),
+        "cpu.temp" | "cpu.temp_max" | "gpu.temp" | "gpu.temp_max" => {
+            convert_temperature(raw, unit)
+        }
+        "battery.voltage" => convert_voltage(raw, unit),
+        "cpu.freq" | "gpu.freq" => convert_frequency(raw, unit),
+        _ => Some(raw),
     }
 }
 
