@@ -66,11 +66,19 @@ pub fn build_catalog() -> Vec<CatalogMetric> {
         catalog_metric("net.tx_bytes_rate", "Network Transmitted (rate, per-interface)", "B/s", MEMORY_RATE_UNITS, false, MetricDataType::StringList),
         catalog_metric("net.rx_packets_rate", "Network Packets Received (rate, per-interface)", "pps", &["pps"], false, MetricDataType::StringList),
         catalog_metric("net.tx_packets_rate", "Network Packets Transmitted (rate, per-interface)", "pps", &["pps"], false, MetricDataType::StringList),
-        catalog_metric("disk.count", "Disk Count", "disks", &["disks"], false, MetricDataType::Integer),
-        catalog_metric("disk.total", "Disk Total Space", "GB", MEMORY_UNITS, false, MetricDataType::Float),
-        catalog_metric("disk.used", "Disk Used Space", "GB", MEMORY_UNITS, false, MetricDataType::Float),
-        catalog_metric("disk.available", "Disk Available Space", "GB", MEMORY_UNITS, false, MetricDataType::Float),
-        catalog_metric("disk.usage", "Disk Usage", "%", &["%"], false, MetricDataType::Float),
+        catalog_metric("disk.count", "Disk Count (physical)", "disks", &["disks"], false, MetricDataType::Integer),
+        catalog_metric("disk.total", "Disk Total Space (aggregate)", "GB", MEMORY_UNITS, false, MetricDataType::Float),
+        catalog_metric("disk.used", "Disk Used Space (aggregate)", "GB", MEMORY_UNITS, false, MetricDataType::Float),
+        catalog_metric("disk.available", "Disk Available Space (aggregate)", "GB", MEMORY_UNITS, false, MetricDataType::Float),
+        catalog_metric("disk.usage", "Disk Usage (aggregate)", "%", &["%"], false, MetricDataType::Float),
+        catalog_metric("disk.mount_points", "Disk Mount Points", "", &[""], false, MetricDataType::StringList),
+        catalog_metric("disk.per_mount.name", "Disk Device Name (per-mountpoint)", "", &[""], false, MetricDataType::StringList),
+        catalog_metric("disk.per_mount.total", "Disk Total Space (per-mountpoint)", "GB", MEMORY_UNITS, false, MetricDataType::StringList),
+        catalog_metric("disk.per_mount.used", "Disk Used Space (per-mountpoint)", "GB", MEMORY_UNITS, false, MetricDataType::StringList),
+        catalog_metric("disk.per_mount.available", "Disk Available Space (per-mountpoint)", "GB", MEMORY_UNITS, false, MetricDataType::StringList),
+        catalog_metric("disk.per_mount.usage", "Disk Usage (per-mountpoint)", "%", &["%"], false, MetricDataType::StringList),
+        catalog_metric("disk.per_mount.filesystem", "Disk File System (per-mountpoint)", "", &[""], false, MetricDataType::StringList),
+        catalog_metric("disk.per_mount.removable", "Disk Removable Flag (per-mountpoint)", "", &[""], false, MetricDataType::StringList),
         catalog_metric("battery.state", "Battery State", "", &[""], false, MetricDataType::String),
         catalog_metric("battery.charge", "Battery Charge", "%", &["%"], false, MetricDataType::Float),
         catalog_metric("battery.voltage", "Battery Voltage", "V", &["V", "mV"], false, MetricDataType::Float),
@@ -463,7 +471,7 @@ impl Collector {
             "disk.count" => {
                 drop(sys);
                 let disks = self.disks.lock().expect("Collector mutex poisoned");
-                Some(disks.len() as f64)
+                Some(physical_disk_count(&disks) as f64)
             }
             "disk.total" | "disk.used" | "disk.available" | "disk.usage" => {
                 drop(sys);
@@ -768,6 +776,53 @@ impl Collector {
                 }
                 Some(out)
             }
+            "disk.mount_points" | "disk.per_mount.name" | "disk.per_mount.total"
+            | "disk.per_mount.used" | "disk.per_mount.available" | "disk.per_mount.usage"
+            | "disk.per_mount.filesystem" | "disk.per_mount.removable" => {
+                let disks = self.disks.lock().expect("Collector mutex poisoned");
+                let scale = convert_bytes(1.0, unit).unwrap_or(1.0);
+                let mut out: Vec<String> = Vec::new();
+                for d in disks.list() {
+                    let mp = d.mount_point().to_string_lossy().to_string();
+                    match metric_id {
+                        "disk.mount_points" => {
+                            out.push(mp);
+                        }
+                        "disk.per_mount.name" => {
+                            out.push(format!("{}:{}", mp, d.name().to_string_lossy()));
+                        }
+                        "disk.per_mount.total" => {
+                            out.push(format!("{}:{:.2}", mp, d.total_space() as f64 / scale));
+                        }
+                        "disk.per_mount.used" => {
+                            let used = d.total_space() - d.available_space();
+                            out.push(format!("{}:{:.2}", mp, used as f64 / scale));
+                        }
+                        "disk.per_mount.available" => {
+                            out.push(format!("{}:{:.2}", mp, d.available_space() as f64 / scale));
+                        }
+                        "disk.per_mount.usage" => {
+                            let total = d.total_space();
+                            if total > 0 {
+                                let used = total - d.available_space();
+                                out.push(format!("{}:{:.2}", mp, (used as f64 / total as f64) * 100.0));
+                            }
+                        }
+                        "disk.per_mount.filesystem" => {
+                            out.push(format!("{}:{}", mp, d.file_system().to_string_lossy()));
+                        }
+                        "disk.per_mount.removable" => {
+                            out.push(format!("{}:{}", mp, d.is_removable()));
+                        }
+                        _ => {}
+                    }
+                }
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
+            }
             _ => None,
         }
     }
@@ -928,6 +983,47 @@ fn convert_temperature(celsius: f64, unit: &str) -> Option<f64> {
         "F" => Some(celsius * 9.0 / 5.0 + 32.0),
         _ => None,
     }
+}
+
+fn physical_disk_name(device: &str) -> String {
+    let real = std::fs::canonicalize(device)
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .unwrap_or_else(|| device.to_string());
+    if device.starts_with("/dev/mapper/") || device.starts_with("/dev/root") {
+        if real != device {
+            return physical_disk_name(&real);
+        }
+    }
+    if device.starts_with("/dev/sd") || device.starts_with("/dev/vd") {
+        return real.trim_end_matches(|c| c >= '0' && c <= '9').to_string();
+    }
+    if device.starts_with("/dev/nvme") {
+        return real
+            .trim_end_matches(|c| c >= '0' && c <= '9')
+            .trim_end_matches('p')
+            .to_string();
+    }
+    if device.starts_with("/dev/mmcblk") {
+        return real.trim_end_matches('p').trim_end_matches(|c| c >= '0' && c <= '9').to_string();
+    }
+    real
+}
+
+fn physical_disk_count(disks: &Disks) -> usize {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for d in disks.list() {
+        if let Some(name) = d.name().to_str() {
+            if name.is_empty() {
+                continue;
+            }
+            let phys = physical_disk_name(name);
+            if phys.starts_with("/dev/") && !phys.starts_with("/dev/loop") {
+                seen.insert(phys);
+            }
+        }
+    }
+    seen.len()
 }
 
 fn is_cpu_component(label: &str) -> bool {
