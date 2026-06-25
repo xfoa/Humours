@@ -43,9 +43,11 @@ pub fn build_catalog() -> Vec<CatalogMetric> {
         catalog_metric("cpu.temp_max", "CPU Temperature (max)", "C", TEMP_UNITS, false, MetricDataType::Float),
         catalog_metric("cpu.temps", "CPU Temperatures (per-component)", "C", TEMP_UNITS, false, MetricDataType::StringList),
         catalog_metric("mem.used", "Memory Used", "GB", MEMORY_UNITS, false, MetricDataType::Float),
+        catalog_metric("mem.free", "Memory Free", "GB", MEMORY_UNITS, false, MetricDataType::Float),
         catalog_metric("mem.total", "Memory Total", "GB", MEMORY_UNITS, true, MetricDataType::Integer),
         catalog_metric("mem.usage", "Memory Usage", "%", &["%"], false, MetricDataType::Float),
         catalog_metric("swap.used", "Swap Used", "GB", MEMORY_UNITS, false, MetricDataType::Float),
+        catalog_metric("swap.free", "Swap Free", "GB", MEMORY_UNITS, false, MetricDataType::Float),
         catalog_metric("swap.total", "Swap Total", "GB", MEMORY_UNITS, true, MetricDataType::Integer),
         catalog_metric("sys.uptime", "System Uptime", "s", &["s", "ms", "m", "h"], false, MetricDataType::Float),
         catalog_metric("sys.load1", "Load Average (1m)", "", &[""], false, MetricDataType::Float),
@@ -454,6 +456,7 @@ impl Collector {
                 cpu_temp_max(&components).map(|t| t as f64)
             }
             "mem.used" => Some(sys.used_memory() as f64),
+            "mem.free" => Some(sys.free_memory() as f64),
             "mem.total" => Some(sys.total_memory() as f64),
             "mem.usage" => {
                 let total = sys.total_memory() as f64;
@@ -464,6 +467,7 @@ impl Collector {
                 }
             }
             "swap.used" => Some(sys.used_swap() as f64),
+            "swap.free" => Some(sys.free_swap() as f64),
             "swap.total" => Some(sys.total_swap() as f64),
             "sys.uptime" => Some(sysinfo::System::uptime() as f64),
             "sys.load1" => Some(System::load_average().one),
