@@ -42,3 +42,4 @@ tokio = { version = "1", features = ["full", "test-util"] }
 
 [patch.crates-io]
 all-smi = { path = "vendor/all-smi" }
+sysinfo = { path = "vendor/sysinfo" }
