@@ -36,8 +36,8 @@ async fn main() -> anyhow::Result<()> {
             anyhow::bail!("tls_cert and tls_key must both be set or both be omitted");
         }
         (None, None) => {
-            tracing::warn!("no TLS configured; starting plain HTTP server at {addr}");
-            None
+            tracing::warn!("no TLS cert configured; generating self-signed certificate on the fly");
+            Some(self_signed_tls_config().await?)
         }
     };
 
@@ -87,6 +87,14 @@ async fn load_tls_config(
     let key_vec = read_private_key(&key)?;
 
     Ok(axum_server::tls_rustls::RustlsConfig::from_der(cert_chain, key_vec).await?)
+}
+
+async fn self_signed_tls_config() -> anyhow::Result<axum_server::tls_rustls::RustlsConfig> {
+    let rcgen::CertifiedKey { cert, signing_key } =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])?;
+    let cert_der = cert.der().to_vec();
+    let key_der = signing_key.serialize_der();
+    Ok(axum_server::tls_rustls::RustlsConfig::from_der(vec![cert_der], key_der).await?)
 }
 
 fn read_private_key(key_pem: &[u8]) -> anyhow::Result<Vec<u8>> {
