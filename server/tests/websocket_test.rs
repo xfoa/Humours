@@ -613,3 +613,106 @@ fn round_to_quantum_aligns_to_50ms() {
     assert_eq!(round_to_quantum(150), 150);
     assert_eq!(round_to_quantum(1234), 1250);
 }
+
+#[test]
+fn catalog_advertises_gpu_metrics() {
+    let catalog = build_catalog();
+    let ids: Vec<_> = catalog.iter().map(|m| m.id.clone()).collect();
+    let expected = [
+        "gpu.count",
+        "gpu.names",
+        "gpu.temp",
+        "gpu.temp_max",
+        "gpu.temps",
+        "gpu.usage",
+        "gpu.usages",
+        "gpu.mem_used",
+        "gpu.mem_total",
+        "gpu.mem_usages",
+        "gpu.freq",
+        "gpu.freqs",
+        "gpu.power",
+        "gpu.powers",
+        "gpu.throttle_slowdown",
+        "gpu.throttle_shutdown",
+        "gpu.pstate",
+        "gpu.fan_rpm",
+    ];
+    for id in expected {
+        assert!(ids.contains(&id.to_string()), "catalog missing {id}");
+    }
+
+    let count = catalog.iter().find(|m| m.id == "gpu.count").unwrap();
+    assert!(count.r#static, "gpu.count should be static");
+    assert_eq!(count.data_type, MetricDataType::Integer);
+
+    let temp = catalog.iter().find(|m| m.id == "gpu.temp").unwrap();
+    assert!(!temp.r#static, "gpu.temp should not be static");
+    assert_eq!(temp.data_type, MetricDataType::Float);
+    assert_eq!(temp.default_unit, "C");
+    assert!(temp.available_units.contains(&"F".to_string()));
+
+    let temps = catalog.iter().find(|m| m.id == "gpu.temps").unwrap();
+    assert_eq!(temps.data_type, MetricDataType::StringList);
+
+    let usage = catalog.iter().find(|m| m.id == "gpu.usage").unwrap();
+    assert_eq!(usage.data_type, MetricDataType::Float);
+    assert_eq!(usage.default_unit, "%");
+
+    let mem_used = catalog.iter().find(|m| m.id == "gpu.mem_used").unwrap();
+    assert_eq!(mem_used.data_type, MetricDataType::Float);
+    assert_eq!(mem_used.default_unit, "MB");
+    assert!(mem_used.available_units.contains(&"GB".to_string()));
+
+    let freq = catalog.iter().find(|m| m.id == "gpu.freq").unwrap();
+    assert_eq!(freq.default_unit, "MHz");
+    assert!(freq.available_units.contains(&"GHz".to_string()));
+
+    let pstate = catalog.iter().find(|m| m.id == "gpu.pstate").unwrap();
+    assert_eq!(pstate.data_type, MetricDataType::StringList);
+
+    let fan = catalog.iter().find(|m| m.id == "gpu.fan_rpm").unwrap();
+    assert_eq!(fan.data_type, MetricDataType::StringList);
+    assert_eq!(fan.default_unit, "RPM");
+}
+
+#[tokio::test]
+async fn gpu_count_static_metric_delivered() {
+    let url = spawn(make_state()).await;
+    let mut ws = connect(&url, Some("secret")).await;
+    let _ = ws.next().await.unwrap();
+
+    let sub = SubscribeMessage {
+        msg_type: "subscribe".to_string(),
+        metrics: vec![humours_server::protocol::SubscribeEntry {
+            id: "gpu.count".to_string(),
+            refresh_rate_ms: None,
+            unit: None,
+        }],
+    };
+    ws.send(Message::Text(serde_json::to_string(&sub).unwrap().into()))
+        .await
+        .unwrap();
+
+    let mut count_seen = 0;
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(400) {
+        let raw = match tokio::time::timeout(std::time::Duration::from_millis(100), ws.next())
+            .await
+        {
+            Ok(Some(Ok(m))) => m.into_text().unwrap(),
+            _ => continue,
+        };
+        if let Ok(msg) = serde_json::from_str::<DataMessage>(&raw) {
+            if let Some(m) = find_metric(&msg, "gpu.count") {
+                count_seen += 1;
+                let v = serde_json::to_value(&m.value).unwrap();
+                assert!(v.is_i64() || v.is_f64() || v.is_u64(), "gpu.count value should be numeric, got {v}");
+            }
+        }
+    }
+    assert_eq!(
+        count_seen, 1,
+        "gpu.count (static) was sent {count_seen} times, expected 1"
+    );
+}

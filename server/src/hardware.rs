@@ -1,4 +1,5 @@
 use crate::protocol::{CatalogMetric, MetricDataType, MetricNumber};
+use all_smi::{AllSmi, AllSmiConfig};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -73,6 +74,24 @@ pub fn build_catalog() -> Vec<CatalogMetric> {
         catalog_metric("battery.state", "Battery State", "", &[""], false, MetricDataType::String),
         catalog_metric("battery.charge", "Battery Charge", "%", &["%"], false, MetricDataType::Float),
         catalog_metric("battery.voltage", "Battery Voltage", "V", &["V", "mV"], false, MetricDataType::Float),
+        catalog_metric("gpu.count", "GPU Count", "gpus", &["gpus"], true, MetricDataType::Integer),
+        catalog_metric("gpu.names", "GPU Names (per-index)", "", &[""], false, MetricDataType::StringList),
+        catalog_metric("gpu.temp", "GPU Temperature (average)", "C", TEMP_UNITS, false, MetricDataType::Float),
+        catalog_metric("gpu.temp_max", "GPU Temperature (max)", "C", TEMP_UNITS, false, MetricDataType::Float),
+        catalog_metric("gpu.temps", "GPU Temperatures (per-index)", "C", TEMP_UNITS, false, MetricDataType::StringList),
+        catalog_metric("gpu.usage", "GPU Utilization (average)", "%", &["%"], false, MetricDataType::Float),
+        catalog_metric("gpu.usages", "GPU Utilization (per-index)", "%", &["%"], false, MetricDataType::StringList),
+        catalog_metric("gpu.mem_used", "GPU Memory Used (average)", "MB", MEMORY_UNITS, false, MetricDataType::Float),
+        catalog_metric("gpu.mem_total", "GPU Memory Total (average)", "MB", MEMORY_UNITS, false, MetricDataType::Float),
+        catalog_metric("gpu.mem_usages", "GPU Memory (per-index, used:total)", "MB", MEMORY_UNITS, false, MetricDataType::StringList),
+        catalog_metric("gpu.freq", "GPU Frequency (average)", "MHz", &["MHz", "GHz"], false, MetricDataType::Float),
+        catalog_metric("gpu.freqs", "GPU Frequency (per-index)", "MHz", &["MHz", "GHz"], false, MetricDataType::StringList),
+        catalog_metric("gpu.power", "GPU Power Consumption (average)", "W", &["W"], false, MetricDataType::Float),
+        catalog_metric("gpu.powers", "GPU Power Consumption (per-index)", "W", &["W"], false, MetricDataType::StringList),
+        catalog_metric("gpu.throttle_slowdown", "GPU Slowdown Throttle Threshold (per-index, NVIDIA)", "C", TEMP_UNITS, false, MetricDataType::StringList),
+        catalog_metric("gpu.throttle_shutdown", "GPU Shutdown Throttle Threshold (per-index, NVIDIA)", "C", TEMP_UNITS, false, MetricDataType::StringList),
+        catalog_metric("gpu.pstate", "GPU Performance State (per-index, NVIDIA)", "", &[""], false, MetricDataType::StringList),
+        catalog_metric("gpu.fan_rpm", "GPU Fan Speed (per-index, AMD)", "RPM", &["RPM"], false, MetricDataType::StringList),
         catalog_metric("os.name", "Operating System", "", &[""], true, MetricDataType::String),
         catalog_metric("os.version", "OS Version", "", &[""], true, MetricDataType::String),
         catalog_metric("os.kernel", "Kernel Version", "", &[""], true, MetricDataType::String),
@@ -158,6 +177,7 @@ pub struct Collector {
     gateway_cache: Arc<Mutex<Option<(String, Instant)>>>,
     wifi_cache: Arc<Mutex<Option<(Vec<String>, Instant)>>>,
     route_cache: Arc<Mutex<Option<(Vec<String>, Instant)>>>,
+    gpus: Arc<Mutex<Option<AllSmi>>>,
 }
 
 impl Default for Collector {
@@ -187,6 +207,9 @@ impl Collector {
             gateway_cache: Arc::new(Mutex::new(None)),
             wifi_cache: Arc::new(Mutex::new(None)),
             route_cache: Arc::new(Mutex::new(None)),
+            gpus: Arc::new(Mutex::new(
+                AllSmi::with_config(AllSmiConfig::default()).ok(),
+            )),
         }
     }
 
@@ -219,6 +242,18 @@ impl Collector {
 
     fn needs_components(id: &str) -> bool {
         id == "cpu.temp" || id == "cpu.temp_max" || id == "cpu.temps"
+    }
+
+    fn needs_gpus(id: &str) -> bool {
+        id.starts_with("gpu.")
+    }
+
+    fn gpu_infos(&self) -> Vec<all_smi::device::GpuInfo> {
+        let lock = self.gpus.lock().expect("Collector mutex poisoned");
+        match lock.as_ref() {
+            Some(smi) => smi.get_gpu_info(),
+            None => Vec::new(),
+        }
     }
 
     fn refresh_networks(&self) {
@@ -291,6 +326,8 @@ impl Collector {
         let want_disks = ids.iter().any(|i| Self::needs_disks(i));
         let want_net = ids.iter().any(|i| Self::needs_networks(i));
         let want_components = ids.iter().any(|i| Self::needs_components(i));
+        let want_gpus = ids.iter().any(|i| Self::needs_gpus(i));
+        let _ = want_gpus;
 
         if want_cpu || want_mem || want_procs || want_sys_load {
             let mut sys = self.sys.lock().expect("Collector mutex poisoned");
@@ -332,6 +369,50 @@ impl Collector {
                     use battery::units::electric_potential::volt;
                     b.voltage().get::<volt>() as f64
                 });
+            }
+            "gpu.count" => {
+                return Some(self.gpu_infos().len() as f64);
+            }
+            "gpu.temp" => {
+                let temps = gpu_temps_celsius(&self.gpu_infos());
+                return gpu_temp_average(&temps).map(|t| t as f64);
+            }
+            "gpu.temp_max" => {
+                let temps = gpu_temps_celsius(&self.gpu_infos());
+                return gpu_temp_max(&temps).map(|t| t as f64);
+            }
+            "gpu.usage" => {
+                let gpus = self.gpu_infos();
+                let vals: Vec<f64> = gpus.iter().map(|g| g.utilization).filter(|v| *v > 0.0).collect();
+                return gpu_scalar_average(&vals);
+            }
+            "gpu.mem_used" => {
+                let gpus = self.gpu_infos();
+                let vals: Vec<f64> = gpus
+                    .iter()
+                    .map(|g| g.used_memory as f64)
+                    .filter(|v| *v > 0.0)
+                    .collect();
+                return gpu_scalar_average(&vals);
+            }
+            "gpu.mem_total" => {
+                let gpus = self.gpu_infos();
+                let vals: Vec<f64> = gpus
+                    .iter()
+                    .map(|g| g.total_memory as f64)
+                    .filter(|v| *v > 0.0)
+                    .collect();
+                return gpu_scalar_average(&vals);
+            }
+            "gpu.freq" => {
+                let gpus = self.gpu_infos();
+                let vals: Vec<f64> = gpu_freqs_mhz(&gpus);
+                return gpu_scalar_average(&vals);
+            }
+            "gpu.power" => {
+                let gpus = self.gpu_infos();
+                let vals: Vec<f64> = gpu_powers_watts(&gpus);
+                return gpu_scalar_average(&vals);
             }
             _ => {}
         }
@@ -432,6 +513,155 @@ impl Collector {
                     out.push(format!("{}:{:.2}", label, scaled));
                 }
                 Some(out)
+            }
+            "gpu.names" => {
+                let gpus = self.gpu_infos();
+                if gpus.is_empty() {
+                    None
+                } else {
+                    Some(
+                        gpus.iter()
+                            .enumerate()
+                            .map(|(i, g)| format!("{}:{}", i, g.name))
+                            .collect(),
+                    )
+                }
+            }
+            "gpu.temps" => {
+                let gpus = self.gpu_infos();
+                if gpus.is_empty() {
+                    return None;
+                }
+                // Skip GPUs that report no temperature (0 means "not
+                // available" in all-smi's GpuInfo, e.g. Intel iGPUs on
+                // kernels without the i915 hwmon interface, or Apple
+                // Silicon which exposes thermal pressure instead).
+                let mut out: Vec<String> = Vec::new();
+                for (i, g) in gpus.iter().enumerate() {
+                    if g.temperature == 0 {
+                        continue;
+                    }
+                    let scaled = convert_temperature(g.temperature as f64, unit)
+                        .unwrap_or(g.temperature as f64);
+                    out.push(format!("{}:{:.2}", i, scaled));
+                }
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
+            }
+            "gpu.usages" => {
+                let gpus = self.gpu_infos();
+                if gpus.is_empty() {
+                    return None;
+                }
+                let out: Vec<String> = gpus
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, g)| g.utilization > 0.0)
+                    .map(|(i, g)| format!("{}:{:.2}", i, g.utilization))
+                    .collect();
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
+            }
+            "gpu.mem_usages" => {
+                let gpus = self.gpu_infos();
+                if gpus.is_empty() {
+                    return None;
+                }
+                let scale = convert_bytes(1.0, unit).unwrap_or(1.0);
+                Some(
+                    gpus.iter()
+                        .enumerate()
+                        .map(|(i, g)| {
+                            format!(
+                                "{}:{:.2}:{:.2}",
+                                i,
+                                g.used_memory as f64 / scale,
+                                g.total_memory as f64 / scale
+                            )
+                        })
+                        .collect(),
+                )
+            }
+            "gpu.freqs" => {
+                let gpus = self.gpu_infos();
+                let out: Vec<String> = gpus
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, g)| {
+                        if g.frequency == 0 {
+                            return None;
+                        }
+                        let scaled = convert_frequency(g.frequency as f64, unit)
+                            .unwrap_or(g.frequency as f64);
+                        Some(format!("{}:{:.2}", i, scaled))
+                    })
+                    .collect();
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
+            }
+            "gpu.powers" => {
+                let gpus = self.gpu_infos();
+                let out: Vec<String> = gpus
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, g)| {
+                        if g.power_consumption <= 0.0 {
+                            return None;
+                        }
+                        Some(format!("{}:{:.2}", i, g.power_consumption))
+                    })
+                    .collect();
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
+            }
+            "gpu.throttle_slowdown" => gpu_threshold_list(&self.gpu_infos(), unit, |g| {
+                g.temperature_threshold_slowdown
+            }),
+            "gpu.throttle_shutdown" => gpu_threshold_list(&self.gpu_infos(), unit, |g| {
+                g.temperature_threshold_shutdown
+            }),
+            "gpu.pstate" => {
+                let gpus = self.gpu_infos();
+                let out: Vec<String> = gpus
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, g)| g.performance_state.map(|p| format!("{}:P{p}", i)))
+                    .collect();
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
+            }
+            "gpu.fan_rpm" => {
+                let gpus = self.gpu_infos();
+                let out: Vec<String> = gpus
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, g)| {
+                        g.detail
+                            .get("Fan Speed")
+                            .and_then(|s| parse_fan_rpm(s))
+                            .map(|rpm| format!("{}:{rpm}", i))
+                    })
+                    .collect();
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
             }
             "net.interfaces" => {
                 let networks = self.networks.lock().expect("Collector mutex poisoned");
@@ -658,15 +888,21 @@ fn convert_value(raw: f64, metric_id: &str, unit: &str) -> Option<f64> {
         || metric_id == "disk.total"
         || metric_id == "disk.used"
         || metric_id == "disk.available"
+        || metric_id == "gpu.mem_used"
+        || metric_id == "gpu.mem_total"
     {
         convert_bytes(raw, unit)
     } else if metric_id == "sys.uptime" {
         convert_seconds(raw, unit)
-    } else if metric_id == "cpu.temp" || metric_id == "cpu.temp_max" {
+    } else if metric_id == "cpu.temp"
+        || metric_id == "cpu.temp_max"
+        || metric_id == "gpu.temp"
+        || metric_id == "gpu.temp_max"
+    {
         convert_temperature(raw, unit)
     } else if metric_id == "battery.voltage" {
         convert_voltage(raw, unit)
-    } else if metric_id == "cpu.freq" {
+    } else if metric_id == "cpu.freq" || metric_id == "gpu.freq" {
         convert_frequency(raw, unit)
     } else {
         Some(raw)
@@ -736,6 +972,81 @@ fn cpu_temp_max(components: &Components) -> Option<f32> {
         .into_iter()
         .map(|(_, t)| t)
         .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+fn gpu_temps_celsius(gpus: &[all_smi::device::GpuInfo]) -> Vec<f32> {
+    gpus
+        .iter()
+        .map(|g| g.temperature as f32)
+        .filter(|t| *t > 0.0)
+        .collect()
+}
+
+fn gpu_temp_average(temps: &[f32]) -> Option<f32> {
+    if temps.is_empty() {
+        None
+    } else {
+        let sum: f32 = temps.iter().sum();
+        Some(sum / temps.len() as f32)
+    }
+}
+
+fn gpu_temp_max(temps: &[f32]) -> Option<f32> {
+    temps
+        .iter()
+        .copied()
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+fn gpu_scalar_average(vals: &[f64]) -> Option<f64> {
+    if vals.is_empty() {
+        None
+    } else {
+        let sum: f64 = vals.iter().sum();
+        Some(sum / vals.len() as f64)
+    }
+}
+
+fn gpu_freqs_mhz(gpus: &[all_smi::device::GpuInfo]) -> Vec<f64> {
+    gpus.iter()
+        .map(|g| g.frequency as f64)
+        .filter(|f| *f > 0.0)
+        .collect()
+}
+
+fn gpu_powers_watts(gpus: &[all_smi::device::GpuInfo]) -> Vec<f64> {
+    gpus.iter()
+        .map(|g| g.power_consumption)
+        .filter(|p| *p > 0.0)
+        .collect()
+}
+
+fn gpu_threshold_list(
+    gpus: &[all_smi::device::GpuInfo],
+    unit: &str,
+    pick: fn(&all_smi::device::GpuInfo) -> Option<u32>,
+) -> Option<Vec<String>> {
+    let out: Vec<String> = gpus
+        .iter()
+        .enumerate()
+        .filter_map(|(i, g)| {
+            let raw = pick(g)?;
+            if raw == 0 {
+                return None;
+            }
+            let scaled = convert_temperature(raw as f64, unit).unwrap_or(raw as f64);
+            Some(format!("{}:{:.2}", i, scaled))
+        })
+        .collect();
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn parse_fan_rpm(s: &str) -> Option<u32> {
+    s.split_whitespace().next()?.parse().ok()
 }
 
 fn run_capture(cmd: &mut std::process::Command) -> Option<String> {
