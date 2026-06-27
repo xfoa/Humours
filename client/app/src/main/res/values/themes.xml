@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.Humours" parent="android:Theme.Material.NoActionBar" />
+</resources>
