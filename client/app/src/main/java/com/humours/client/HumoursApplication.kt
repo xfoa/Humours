@@ -16,6 +16,7 @@ class HumoursApplication : Application() {
     lateinit var httpClient: OkHttpClient
     lateinit var repository: MetricRepository
     lateinit var settingsStore: SettingsStore
+    lateinit var layoutStore: com.humours.client.data.local.LayoutStore
     lateinit var connectionManager: ConnectionManager
     lateinit var pluginLoader: PluginLoader
     lateinit var glThread: GLThread
@@ -30,6 +31,7 @@ class HumoursApplication : Application() {
         httpClient = unsafeOkHttpClient()
         repository = MetricRepository()
         settingsStore = SettingsStore(this)
+        layoutStore = com.humours.client.data.local.LayoutStore(this)
         pluginLoader = PluginLoader(this).apply {
             registerBuiltin(builtInPluginClassName) { CubeTetrahedronPlugin() }
         }

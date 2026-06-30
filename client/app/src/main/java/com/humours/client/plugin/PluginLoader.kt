@@ -40,4 +40,6 @@ class PluginLoader(private val context: Context) {
             builtin[className]?.let { it().metadata }
         }.getOrNull()
     }
+
+    fun availablePlugins(): List<String> = builtin.keys.toList()
 }

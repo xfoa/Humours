@@ -4,38 +4,160 @@ import android.view.SurfaceView
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ViewQuilt
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Scaffold
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.humours.client.HumoursApplication
 import com.humours.client.builtin.CubeTetrahedronPlugin
+import com.humours.client.data.local.StoredWidget
 import com.humours.client.plugin.PluginInstance
+import com.humours.client.plugin.WidgetPlugin
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
+
+private data class WidgetPlacement(
+    val id: String,
+    val plugin: String,
+    var x: Int,
+    var y: Int,
+    var width: Int,
+    var height: Int,
+)
+
+private fun WidgetPlacement.toStored(): StoredWidget =
+    StoredWidget(id, plugin, x, y, width, height)
+
+private fun metricsFor(plugin: String): List<String> = CubeTetrahedronPlugin.CUBE_METRICS
+
+private fun realScreenSizePx(context: android.content.Context): Pair<Int, Int> {
+    val wm = context.getSystemService(android.content.Context.WINDOW_SERVICE) as android.view.WindowManager
+    return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+        val b = wm.currentWindowMetrics.bounds
+        b.width() to b.height()
+    } else {
+        val point = android.graphics.Point()
+        @Suppress("DEPRECATION")
+        wm.defaultDisplay.getRealSize(point)
+        point.x to point.y
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun GridScreen(onDisconnect: () -> Unit) {
+fun GridScreen(
+    onDisconnect: () -> Unit,
+    onNavigate: (String) -> Unit,
+) {
     val context = LocalContext.current
     val app = remember { context.applicationContext as HumoursApplication }
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val defaultSizePx = remember { with(density) { 180.dp.toPx().roundToInt() } }
+    var canvasWidthPx by remember { mutableStateOf(0) }
+    var canvasHeightPx by remember { mutableStateOf(0) }
+    val fallback = remember(context) { realScreenSizePx(context) }
+    val screenWidthPx = if (canvasWidthPx > 0) canvasWidthPx else fallback.first
+    val screenHeightPx = if (canvasHeightPx > 0) canvasHeightPx else fallback.second
+    val gridCellPx = remember(screenWidthPx) {
+        (screenWidthPx / 12f).roundToInt().coerceAtLeast(48)
+    }
+
+    var overlayVisible by remember { mutableStateOf(false) }
+    var pluginSheetVisible by remember { mutableStateOf(false) }
+    var addSheetVisible by remember { mutableStateOf(false) }
+    var layoutMode by remember { mutableStateOf(false) }
     var cubesVisible by remember { mutableStateOf(true) }
+    var loaded by remember { mutableStateOf(false) }
+
+    var widgets by remember { mutableStateOf<List<WidgetPlacement>>(emptyList()) }
+
+    val defaultPlugin = app.builtInPluginClassName
+
+    LaunchedEffect(Unit) {
+        val stored = app.layoutStore.layout.first()
+        if (stored.isEmpty()) {
+            widgets = listOf(
+                WidgetPlacement(
+                    id = "widget-cube",
+                    plugin = defaultPlugin,
+                    x = 0, y = 0,
+                    width = defaultSizePx,
+                    height = defaultSizePx,
+                )
+            )
+        } else {
+            widgets = stored.map {
+                WidgetPlacement(it.id, it.plugin, it.x, it.y, it.width, it.height)
+            }
+        }
+        loaded = true
+    }
+
+    LaunchedEffect(widgets, layoutMode) {
+        if (!loaded) return@LaunchedEffect
+        app.layoutStore.save(widgets.map { it.toStored() })
+    }
 
     fun doDisconnect() {
         cubesVisible = false
@@ -44,7 +166,34 @@ fun GridScreen(onDisconnect: () -> Unit) {
         onDisconnect()
     }
 
-    BackHandler(enabled = true) { doDisconnect() }
+    fun removeWidget(id: String) {
+        widgets = widgets.filter { it.id != id }
+        app.pluginInstanceManager.destroy(id)
+    }
+
+    fun addWidget(pluginClass: String) {
+        val base = pluginClass.substringAfterLast('.').lowercase()
+        var id = "$base-${widgets.size + 1}"
+        var i = widgets.size + 1
+        while (widgets.any { it.id == id }) { i++; id = "$base-$i" }
+        widgets = widgets + WidgetPlacement(id, pluginClass, 0, 0, defaultSizePx, defaultSizePx)
+        registerPlugin(app, id, pluginClass)
+    }
+
+    fun toggleLayout() {
+        layoutMode = !layoutMode
+        overlayVisible = false
+    }
+
+    BackHandler(enabled = true) {
+        when {
+            overlayVisible -> overlayVisible = false
+            pluginSheetVisible -> pluginSheetVisible = false
+            addSheetVisible -> addSheetVisible = false
+            layoutMode -> layoutMode = false
+            else -> Unit
+        }
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -53,65 +202,458 @@ fun GridScreen(onDisconnect: () -> Unit) {
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Grid") },
-                actions = {
-                    TextButton(onClick = { doDisconnect() }) { Text("Disconnect") }
-                }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .onSizeChanged {
+                canvasWidthPx = it.width
+                canvasHeightPx = it.height
+            }
+    ) {
+        if (cubesVisible) {
+            widgets.forEach { placement ->
+                WidgetCanvasCell(
+                    placement = placement,
+                    pluginClass = placement.plugin,
+                    layoutMode = layoutMode,
+                    gridCell = gridCellPx,
+                    screenWidth = screenWidthPx,
+                    screenHeight = screenHeightPx,
+                    onDelete = { removeWidget(placement.id) },
+                )
+            }
+        }
+
+        if (!overlayVisible && !layoutMode && !pluginSheetVisible && !addSheetVisible) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { overlayVisible = true }
             )
         }
-    ) { padding ->
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
-            modifier = Modifier.fillMaxSize().padding(padding).padding(8.dp),
+
+        AnimatedVisibility(
+            visible = overlayVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
         ) {
-            if (cubesVisible) {
-                items(listOf("widget-cube")) { widgetId ->
-                    WidgetGridCell(widgetId)
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { overlayVisible = false }
+            )
+        }
+
+        AnimatedVisibility(
+            visible = overlayVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.Center),
+        ) {
+            OverlayBar(
+                onDisconnect = {
+                    overlayVisible = false
+                    doDisconnect()
+                },
+                onToggleLayout = ::toggleLayout,
+                onOpenPluginSettings = {
+                    overlayVisible = false
+                    pluginSheetVisible = true
+                },
+                onAbout = {
+                    overlayVisible = false
+                    onNavigate(Routes.ABOUT)
+                },
+            )
+        }
+
+        if (layoutMode) {
+            LayoutModeBanner(onExit = { layoutMode = false })
+        }
+    }
+
+    if (pluginSheetVisible) {
+        val sheetState = rememberModalBottomSheetState()
+        ModalBottomSheet(
+            onDismissRequest = { pluginSheetVisible = false },
+            sheetState = sheetState,
+        ) {
+            Column(Modifier.padding(bottom = 24.dp)) {
+                Text(
+                    text = "Widgets",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+                HorizontalDivider()
+                widgets.forEach { placement ->
+                    WidgetSheetRow(
+                        id = placement.id,
+                        pluginClass = placement.plugin,
+                        onDelete = { removeWidget(placement.id) },
+                    )
+                    HorizontalDivider()
                 }
+                if (widgets.isEmpty()) {
+                    Text(
+                        "No widgets. Add one below.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(16.dp),
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    IconButton(onClick = {
+                        pluginSheetVisible = false
+                        addSheetVisible = true
+                    }) {
+                        Icon(Icons.Filled.Add, contentDescription = "Add plugin")
+                    }
+                }
+                Spacer(Modifier.height(64.dp))
+            }
+        }
+    }
+
+    if (addSheetVisible) {
+        val sheetState = rememberModalBottomSheetState()
+        val available = remember { app.pluginLoader.availablePlugins() }
+        val metadata = remember(available) {
+            available.mapNotNull { cls -> cls to (app.pluginLoader.metadataFor(cls)) }
+        }
+        ModalBottomSheet(
+            onDismissRequest = { addSheetVisible = false },
+            sheetState = sheetState,
+        ) {
+            Column(Modifier.padding(bottom = 24.dp)) {
+                Text(
+                    text = "Choose a plugin to add",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+                HorizontalDivider()
+                metadata.forEach { (cls, meta) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                addWidget(cls)
+                                addSheetVisible = false
+                            }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Filled.Add, contentDescription = null)
+                        Spacer(Modifier.width(16.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(meta?.name ?: cls, style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                cls.substringAfterLast('.'),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    HorizontalDivider()
+                }
+                Spacer(Modifier.height(64.dp))
             }
         }
     }
 }
 
+private fun registerPlugin(app: HumoursApplication, id: String, pluginClass: String) {
+    val metrics = metricsFor(pluginClass)
+    val plugin: WidgetPlugin = app.pluginLoader.load(pluginClass) ?: return
+    app.pluginInstanceManager.register(PluginInstance(id, plugin, metrics))
+}
+
 @Composable
-private fun WidgetGridCell(widgetId: String) {
+private fun WidgetCanvasCell(
+    placement: WidgetPlacement,
+    pluginClass: String,
+    layoutMode: Boolean,
+    gridCell: Int,
+    screenWidth: Int,
+    screenHeight: Int,
+    onDelete: () -> Unit,
+) {
     val context = LocalContext.current
     val app = remember { context.applicationContext as HumoursApplication }
-    DisposableEffect(widgetId) {
+    val density = LocalDensity.current
+    var x by remember(placement.id) { mutableStateOf(placement.x) }
+    var y by remember(placement.id) { mutableStateOf(placement.y) }
+    var w by remember(placement.id) { mutableStateOf(placement.width) }
+    var h by remember(placement.id) { mutableStateOf(placement.height) }
+
+    DisposableEffect(placement.id) {
         onDispose {
-            app.pluginInstanceManager.destroy(widgetId)
+            app.pluginInstanceManager.destroy(placement.id)
         }
     }
-    AndroidView(
-        factory = { ctx ->
-            FrameLayout(ctx).apply {
-                val sv = SurfaceView(ctx)
-                sv.holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
-                sv.visibility = android.view.View.INVISIBLE
-                addView(
-                    sv,
-                    FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
+
+    val minSize = gridCell
+    fun maxX() = (screenWidth - w).coerceAtLeast(0)
+    fun maxY() = (screenHeight - h).coerceAtLeast(0)
+
+    fun targets(max: Int): List<Int> {
+        val out = mutableListOf<Int>()
+        var v = 0
+        while (v < max) {
+            out.add(v)
+            v += gridCell
+        }
+        out.add(max)
+        return out
+    }
+    val xTargets = remember(screenWidth, gridCell) { targets(screenWidth) }
+    val yTargets = remember(screenHeight, gridCell) { targets(screenHeight) }
+
+    fun snapTo(value: Int, ts: List<Int>): Int {
+        val clamped = value.coerceIn(ts.first(), ts.last())
+        return ts.minByOrNull { kotlin.math.abs(it - clamped) } ?: clamped
+    }
+    val snapX: (Int) -> Int = { snapTo(it.coerceIn(0, maxX()), xTargets) }
+    val snapY: (Int) -> Int = { snapTo(it.coerceIn(0, maxY()), yTargets) }
+    val snapW: (Int) -> Int = { value ->
+        val maxW = (screenWidth - x).coerceAtLeast(minSize)
+        snapTo(value.coerceIn(minSize, maxW), targets(screenWidth))
+    }
+    val snapH: (Int) -> Int = { value ->
+        val maxH = (screenHeight - y).coerceAtLeast(minSize)
+        snapTo(value.coerceIn(minSize, maxH), targets(screenHeight))
+    }
+    Box(
+        modifier = Modifier
+            .offset { IntOffset(x, y) }
+            .size(
+                width = with(density) { w.toDp() },
+                height = with(density) { h.toDp() },
+            )
+            .then(
+                if (layoutMode) {
+                    Modifier.border(
+                        width = 2.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                        shape = RoundedCornerShape(12.dp),
                     )
-                )
-                val metrics = CubeTetrahedronPlugin.CUBE_METRICS
-                val plugin = app.pluginLoader.load(app.builtInPluginClassName)
-                if (plugin != null) {
-                    app.pluginInstanceManager.register(
-                        PluginInstance(widgetId, plugin, metrics)
+                } else Modifier
+            )
+            .clip(RoundedCornerShape(12.dp)),
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                FrameLayout(ctx).apply {
+                    val sv = SurfaceView(ctx)
+                    sv.holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
+                    sv.visibility = android.view.View.INVISIBLE
+                    addView(
+                        sv,
+                        FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
                     )
-                    app.pluginInstanceManager.startRendering(widgetId, sv) {}
+                    val metrics = metricsFor(pluginClass)
+                    val plugin = app.pluginLoader.load(pluginClass)
+                    if (plugin != null) {
+                        app.pluginInstanceManager.register(
+                            PluginInstance(placement.id, plugin, metrics)
+                        )
+                        app.pluginInstanceManager.startRendering(placement.id, sv) {}
+                    }
+                    postDelayed({ sv.visibility = android.view.View.VISIBLE }, 300)
+                    this
                 }
-                postDelayed({ sv.visibility = android.view.View.VISIBLE }, 300)
-                this
+            },
+            modifier = Modifier.fillMaxSize(),
+        )
+
+        if (layoutMode) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.25f))
+                    .pointerInput(placement.id) {
+                        detectDragGestures(
+                            onDragEnd = {
+                                x = snapX(x)
+                                y = snapY(y)
+                                placement.x = x
+                                placement.y = y
+                            },
+                        ) { _, drag ->
+                            x = (x + drag.x.roundToInt()).coerceIn(0, maxX())
+                            y = (y + drag.y.roundToInt()).coerceIn(0, maxY())
+                            placement.x = x
+                            placement.y = y
+                        }
+                    }
+            )
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(4.dp),
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.errorContainer,
+                ) {
+                    Icon(
+                        Icons.Filled.Delete,
+                        contentDescription = "Delete widget",
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clickable { onDelete() }
+                            .padding(4.dp),
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                }
             }
-        },
+            ResizeHandle(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(4.dp),
+                onResize = { dx, dy ->
+                    val maxW = (screenWidth - x).coerceAtLeast(minSize)
+                    val maxH = (screenHeight - y).coerceAtLeast(minSize)
+                    w = (w + dx).coerceIn(minSize, maxW)
+                    h = (h + dy).coerceIn(minSize, maxH)
+                    placement.width = w
+                    placement.height = h
+                },
+                onResizeEnd = {
+                    w = snapW(w)
+                    h = snapH(h)
+                    placement.width = w
+                    placement.height = h
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ResizeHandle(
+    modifier: Modifier = Modifier,
+    onResize: (Int, Int) -> Unit,
+    onResizeEnd: () -> Unit = {},
+) {
+    Surface(
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.primaryContainer,
+        modifier = modifier
+            .size(28.dp)
+            .pointerInput(Unit) {
+                detectDragGestures(
+                    onDragEnd = onResizeEnd,
+                ) { _, drag ->
+                    onResize(drag.x.roundToInt(), drag.y.roundToInt())
+                }
+            },
+    ) {
+        Icon(
+            Icons.Filled.DragHandle,
+            contentDescription = "Resize",
+            modifier = Modifier.padding(4.dp),
+            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+        )
+    }
+}
+
+@Composable
+private fun LayoutModeBanner(onExit: () -> Unit) {
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .height(360.dp),
-    )
+            .padding(16.dp),
+        shape = RoundedCornerShape(20.dp),
+        tonalElevation = 6.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.AutoMirrored.Filled.ViewQuilt, contentDescription = null)
+            Spacer(Modifier.width(12.dp))
+            Text("Layout mode", modifier = Modifier.weight(1f))
+            TextButton(onClick = onExit) { Text("Done") }
+        }
+    }
+}
+
+@Composable
+private fun WidgetSheetRow(id: String, pluginClass: String, onDelete: () -> Unit) {
+    val app = (LocalContext.current.applicationContext as HumoursApplication)
+    val meta = remember(pluginClass) { app.pluginLoader.metadataFor(pluginClass) }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { }
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.Tune, contentDescription = null)
+        Spacer(Modifier.width(16.dp))
+        Column(Modifier.weight(1f)) {
+            Text(meta?.name ?: id, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                id,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        IconButton(onClick = onDelete) {
+            Icon(Icons.Filled.Delete, contentDescription = "Remove widget")
+        }
+    }
+}
+
+@Composable
+private fun OverlayBar(
+    onDisconnect: () -> Unit,
+    onToggleLayout: () -> Unit,
+    onOpenPluginSettings: () -> Unit,
+    onAbout: () -> Unit,
+) {
+    Surface(
+        shape = CircleShape,
+        tonalElevation = 6.dp,
+        shadowElevation = 6.dp,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OverlayButton(Icons.Filled.PowerSettingsNew, "Disconnect", onDisconnect)
+            OverlayButton(Icons.AutoMirrored.Filled.ViewQuilt, "Layout mode", onToggleLayout)
+            OverlayButton(Icons.Filled.Tune, "Plugin settings", onOpenPluginSettings)
+            OverlayButton(Icons.Filled.Info, "About", onAbout)
+        }
+    }
+}
+
+@Composable
+private fun OverlayButton(icon: ImageVector, desc: String, onClick: () -> Unit) {
+    IconButton(onClick = onClick) {
+        Icon(
+            icon,
+            contentDescription = desc,
+            modifier = Modifier.size(28.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
