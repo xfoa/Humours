@@ -7,8 +7,11 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -57,14 +60,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.humours.client.HumoursApplication
@@ -129,6 +136,7 @@ fun GridScreen(
     var layoutMode by remember { mutableStateOf(false) }
     var cubesVisible by remember { mutableStateOf(true) }
     var loaded by remember { mutableStateOf(false) }
+    var previewRect by remember { mutableStateOf<IntRect?>(null) }
 
     var widgets by remember { mutableStateOf<List<WidgetPlacement>>(emptyList()) }
 
@@ -221,8 +229,34 @@ fun GridScreen(
                     screenWidth = screenWidthPx,
                     screenHeight = screenHeightPx,
                     onDelete = { removeWidget(placement.id) },
+                    onPreview = { previewRect = it },
                 )
             }
+        }
+
+        if (layoutMode) {
+            GridOverlay(
+                gridCell = gridCellPx,
+                screenWidth = screenWidthPx,
+                screenHeight = screenHeightPx,
+            )
+        }
+
+        previewRect?.let { rect ->
+            Box(
+                modifier = Modifier
+                    .offset { IntOffset(rect.left, rect.top) }
+                    .size(
+                        width = with(density) { rect.width.toDp() },
+                        height = with(density) { rect.height.toDp() },
+                    )
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))
+                    .border(
+                        width = 2.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                        shape = RoundedCornerShape(12.dp),
+                    )
+            )
         }
 
         if (!overlayVisible && !layoutMode && !pluginSheetVisible && !addSheetVisible) {
@@ -379,6 +413,35 @@ private fun registerPlugin(app: HumoursApplication, id: String, pluginClass: Str
     app.pluginInstanceManager.register(PluginInstance(id, plugin, metrics))
 }
 
+private class WidgetGeom(
+    initialX: Int,
+    initialY: Int,
+    initialW: Int,
+    initialH: Int,
+) {
+    val x = mutableStateOf(initialX)
+    val y = mutableStateOf(initialY)
+    val w = mutableStateOf(initialW)
+    val h = mutableStateOf(initialH)
+}
+
+private fun snapTargets(max: Int, cell: Int): List<Int> {
+    val cell = cell.coerceAtLeast(1)
+    val out = mutableListOf<Int>()
+    var v = 0
+    while (v < max) {
+        out.add(v)
+        v += cell
+    }
+    out.add(max)
+    return out
+}
+
+private fun snapTo(value: Int, targets: List<Int>): Int {
+    val clamped = value.coerceIn(targets.first(), targets.last())
+    return targets.minByOrNull { kotlin.math.abs(it - clamped) } ?: clamped
+}
+
 @Composable
 private fun WidgetCanvasCell(
     placement: WidgetPlacement,
@@ -388,14 +451,17 @@ private fun WidgetCanvasCell(
     screenWidth: Int,
     screenHeight: Int,
     onDelete: () -> Unit,
+    onPreview: (IntRect?) -> Unit,
 ) {
     val context = LocalContext.current
     val app = remember { context.applicationContext as HumoursApplication }
     val density = LocalDensity.current
-    var x by remember(placement.id) { mutableStateOf(placement.x) }
-    var y by remember(placement.id) { mutableStateOf(placement.y) }
-    var w by remember(placement.id) { mutableStateOf(placement.width) }
-    var h by remember(placement.id) { mutableStateOf(placement.height) }
+    val minSize = gridCell.coerceAtLeast(1)
+    val geom = remember(placement.id) {
+        WidgetGeom(placement.x, placement.y, placement.width, placement.height)
+    }
+    val xTargets = remember(screenWidth, gridCell) { snapTargets(screenWidth, gridCell) }
+    val yTargets = remember(screenHeight, gridCell) { snapTargets(screenHeight, gridCell) }
 
     DisposableEffect(placement.id) {
         onDispose {
@@ -403,51 +469,64 @@ private fun WidgetCanvasCell(
         }
     }
 
-    val minSize = gridCell
-    fun maxX() = (screenWidth - w).coerceAtLeast(0)
-    fun maxY() = (screenHeight - h).coerceAtLeast(0)
-
-    fun targets(max: Int): List<Int> {
-        val out = mutableListOf<Int>()
-        var v = 0
-        while (v < max) {
-            out.add(v)
-            v += gridCell
-        }
-        out.add(max)
-        return out
-    }
-    val xTargets = remember(screenWidth, gridCell) { targets(screenWidth) }
-    val yTargets = remember(screenHeight, gridCell) { targets(screenHeight) }
-
-    fun snapTo(value: Int, ts: List<Int>): Int {
-        val clamped = value.coerceIn(ts.first(), ts.last())
-        return ts.minByOrNull { kotlin.math.abs(it - clamped) } ?: clamped
-    }
-    val snapX: (Int) -> Int = { snapTo(it.coerceIn(0, maxX()), xTargets) }
-    val snapY: (Int) -> Int = { snapTo(it.coerceIn(0, maxY()), yTargets) }
-    val snapW: (Int) -> Int = { value ->
-        val maxW = (screenWidth - x).coerceAtLeast(minSize)
-        snapTo(value.coerceIn(minSize, maxW), targets(screenWidth))
-    }
-    val snapH: (Int) -> Int = { value ->
-        val maxH = (screenHeight - y).coerceAtLeast(minSize)
-        snapTo(value.coerceIn(minSize, maxH), targets(screenHeight))
-    }
+    var coords by remember { mutableStateOf<LayoutCoordinates?>(null) }
     Box(
         modifier = Modifier
-            .offset { IntOffset(x, y) }
+            .onGloballyPositioned { coords = it }
+            .offset { IntOffset(geom.x.value, geom.y.value) }
             .size(
-                width = with(density) { w.toDp() },
-                height = with(density) { h.toDp() },
+                width = with(density) { geom.w.value.toDp() },
+                height = with(density) { geom.h.value.toDp() },
             )
             .then(
                 if (layoutMode) {
-                    Modifier.border(
-                        width = 2.dp,
-                        color = MaterialTheme.colorScheme.primary,
-                        shape = RoundedCornerShape(12.dp),
-                    )
+                    Modifier
+                        .border(
+                            width = 2.dp,
+                            color = MaterialTheme.colorScheme.primary,
+                            shape = RoundedCornerShape(12.dp),
+                        )
+                        .pointerInput(layoutMode) {
+                            if (!layoutMode) return@pointerInput
+                            var dragTotal = Offset.Zero
+                            detectDragGestures(
+                                onDragStart = {
+                                    dragTotal = Offset.Zero
+                                },
+                                onDragEnd = {
+                                    val cell = gridCell.coerceAtLeast(1)
+                                    val maxXw = (screenWidth - geom.w.value).coerceAtLeast(0)
+                                    val maxYh = (screenHeight - geom.h.value).coerceAtLeast(0)
+                                    val rawX = (geom.x.value + dragTotal.x.roundToInt()).coerceIn(0, maxXw)
+                                    val rawY = (geom.y.value + dragTotal.y.roundToInt()).coerceIn(0, maxYh)
+                                    val sx = (rawX / cell) * cell
+                                    val sy = (rawY / cell) * cell
+                                    geom.x.value = sx
+                                    geom.y.value = sy
+                                    placement.x = sx
+                                    placement.y = sy
+                                    onPreview(null)
+                                },
+                                onDragCancel = { onPreview(null) },
+                            ) { _, drag ->
+                                dragTotal += drag
+                                val cell = gridCell.coerceAtLeast(1)
+                                val maxXw = (screenWidth - geom.w.value).coerceAtLeast(0)
+                                val maxYh = (screenHeight - geom.h.value).coerceAtLeast(0)
+                                val rawX = (geom.x.value + dragTotal.x.roundToInt()).coerceIn(0, maxXw)
+                                val rawY = (geom.y.value + dragTotal.y.roundToInt()).coerceIn(0, maxYh)
+                                val sx = (rawX / cell) * cell
+                                val sy = (rawY / cell) * cell
+                                onPreview(
+                                    IntRect(
+                                        sx,
+                                        sy,
+                                        sx + geom.w.value,
+                                        sy + geom.h.value,
+                                    )
+                                )
+                            }
+                        }
                 } else Modifier
             )
             .clip(RoundedCornerShape(12.dp)),
@@ -458,6 +537,9 @@ private fun WidgetCanvasCell(
                     val sv = SurfaceView(ctx)
                     sv.holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
                     sv.visibility = android.view.View.INVISIBLE
+                    sv.isClickable = false
+                    sv.isFocusable = false
+                    sv.isEnabled = false
                     addView(
                         sv,
                         FrameLayout.LayoutParams(
@@ -465,6 +547,9 @@ private fun WidgetCanvasCell(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                         )
                     )
+                    setOnTouchListener { _, _ -> false }
+                    isClickable = false
+                    isFocusable = false
                     val metrics = metricsFor(pluginClass)
                     val plugin = app.pluginLoader.load(pluginClass)
                     if (plugin != null) {
@@ -485,21 +570,6 @@ private fun WidgetCanvasCell(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black.copy(alpha = 0.25f))
-                    .pointerInput(placement.id) {
-                        detectDragGestures(
-                            onDragEnd = {
-                                x = snapX(x)
-                                y = snapY(y)
-                                placement.x = x
-                                placement.y = y
-                            },
-                        ) { _, drag ->
-                            x = (x + drag.x.roundToInt()).coerceIn(0, maxX())
-                            y = (y + drag.y.roundToInt()).coerceIn(0, maxY())
-                            placement.x = x
-                            placement.y = y
-                        }
-                    }
             )
             Row(
                 modifier = Modifier
@@ -521,23 +591,39 @@ private fun WidgetCanvasCell(
                     )
                 }
             }
+            var pendingW = geom.w.value
+            var pendingH = geom.h.value
+            var gestureStartW = 0
+            var gestureStartH = 0
             ResizeHandle(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(4.dp),
-                onResize = { dx, dy ->
-                    val maxW = (screenWidth - x).coerceAtLeast(minSize)
-                    val maxH = (screenHeight - y).coerceAtLeast(minSize)
-                    w = (w + dx).coerceIn(minSize, maxW)
-                    h = (h + dy).coerceIn(minSize, maxH)
-                    placement.width = w
-                    placement.height = h
+                onResizeStart = {
+                    gestureStartW = geom.w.value
+                    gestureStartH = geom.h.value
+                },
+                onResize = { totalDx, totalDy ->
+                    val maxW = (screenWidth - geom.x.value).coerceAtLeast(minSize)
+                    val maxH = (screenHeight - geom.y.value).coerceAtLeast(minSize)
+                    val cell = gridCell.coerceAtLeast(1)
+                    pendingW = ((gestureStartW + totalDx).coerceIn(minSize, maxW) / cell) * cell
+                    pendingH = ((gestureStartH + totalDy).coerceIn(minSize, maxH) / cell) * cell
+                    onPreview(
+                        IntRect(
+                            geom.x.value,
+                            geom.y.value,
+                            geom.x.value + pendingW,
+                            geom.y.value + pendingH,
+                        )
+                    )
                 },
                 onResizeEnd = {
-                    w = snapW(w)
-                    h = snapH(h)
-                    placement.width = w
-                    placement.height = h
+                    geom.w.value = pendingW
+                    geom.h.value = pendingH
+                    placement.width = pendingW
+                    placement.height = pendingH
+                    onPreview(null)
                 },
             )
         }
@@ -547,6 +633,7 @@ private fun WidgetCanvasCell(
 @Composable
 private fun ResizeHandle(
     modifier: Modifier = Modifier,
+    onResizeStart: () -> Unit = {},
     onResize: (Int, Int) -> Unit,
     onResizeEnd: () -> Unit = {},
 ) {
@@ -556,10 +643,17 @@ private fun ResizeHandle(
         modifier = modifier
             .size(28.dp)
             .pointerInput(Unit) {
+                var total = Offset.Zero
                 detectDragGestures(
+                    onDragStart = {
+                        total = Offset.Zero
+                        onResizeStart()
+                    },
                     onDragEnd = onResizeEnd,
+                    onDragCancel = onResizeEnd,
                 ) { _, drag ->
-                    onResize(drag.x.roundToInt(), drag.y.roundToInt())
+                    total += drag
+                    onResize(total.x.roundToInt(), total.y.roundToInt())
                 }
             },
     ) {
@@ -569,6 +663,34 @@ private fun ResizeHandle(
             modifier = Modifier.padding(4.dp),
             tint = MaterialTheme.colorScheme.onPrimaryContainer,
         )
+    }
+}
+
+@Composable
+private fun GridOverlay(gridCell: Int, screenWidth: Int, screenHeight: Int) {
+    val cell = gridCell.coerceAtLeast(1)
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val lineColor = Color.White.copy(alpha = 0.08f)
+        var nx = cell
+        while (nx < screenWidth) {
+            drawLine(
+                color = lineColor,
+                start = androidx.compose.ui.geometry.Offset(nx.toFloat(), 0f),
+                end = androidx.compose.ui.geometry.Offset(nx.toFloat(), size.height),
+                strokeWidth = 1f,
+            )
+            nx += cell
+        }
+        var ny = cell
+        while (ny < screenHeight) {
+            drawLine(
+                color = lineColor,
+                start = androidx.compose.ui.geometry.Offset(0f, ny.toFloat()),
+                end = androidx.compose.ui.geometry.Offset(size.width, ny.toFloat()),
+                strokeWidth = 1f,
+            )
+            ny += cell
+        }
     }
 }
 
