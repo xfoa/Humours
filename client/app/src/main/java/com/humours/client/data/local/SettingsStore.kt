@@ -56,6 +56,7 @@ data class StoredWidget(
     val y: Int,
     val width: Int,
     val height: Int,
+    val maximised: Boolean = false,
 )
 
 private val layoutKey = stringPreferencesKey("widget_layout")
