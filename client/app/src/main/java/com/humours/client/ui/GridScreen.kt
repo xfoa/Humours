@@ -43,6 +43,8 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -322,6 +324,10 @@ fun GridScreen(
         if (layoutMode) {
             LayoutModeBanner(
                 modifier = Modifier.align(Alignment.TopCenter),
+            )
+            LayoutActionCluster(
+                modifier = Modifier.align(Alignment.BottomCenter),
+                onAdd = { addSheetVisible = true },
                 onExit = { layoutMode = false },
             )
         }
@@ -350,24 +356,11 @@ fun GridScreen(
                 }
                 if (widgets.isEmpty()) {
                     Text(
-                        "No widgets. Add one below.",
+                        "No widgets. Enter layout mode to add one.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(16.dp),
                     )
-                }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalArrangement = Arrangement.End,
-                ) {
-                    IconButton(onClick = {
-                        pluginSheetVisible = false
-                        addSheetVisible = true
-                    }) {
-                        Icon(Icons.Filled.Add, contentDescription = "Add plugin")
-                    }
                 }
                 Spacer(Modifier.height(64.dp))
             }
@@ -748,14 +741,10 @@ private fun GridOverlay(gridCellX: Int, gridCellY: Int, screenWidth: Int, screen
 }
 
 @Composable
-private fun LayoutModeBanner(
-    modifier: Modifier = Modifier,
-    onExit: () -> Unit,
-) {
+private fun LayoutModeBanner(modifier: Modifier = Modifier) {
     Surface(
         modifier = modifier
-            .padding(top = 16.dp)
-            .widthIn(max = 200.dp),
+            .padding(top = 16.dp),
         shape = RoundedCornerShape(20.dp),
         tonalElevation = 6.dp,
     ) {
@@ -770,15 +759,47 @@ private fun LayoutModeBanner(
             )
             Spacer(Modifier.width(8.dp))
             Text("Layout mode", style = MaterialTheme.typography.labelLarge)
-            Spacer(Modifier.width(8.dp))
-            IconButton(
+        }
+    }
+}
+
+@Composable
+private fun LayoutActionCluster(
+    modifier: Modifier = Modifier,
+    onAdd: () -> Unit,
+    onExit: () -> Unit,
+) {
+    Surface(
+        modifier = modifier
+            .padding(bottom = 24.dp),
+        shape = CircleShape,
+        tonalElevation = 6.dp,
+        shadowElevation = 6.dp,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FilledIconButton(
+                onClick = onAdd,
+                modifier = Modifier.size(48.dp),
+            ) {
+                Icon(
+                    Icons.Filled.Add,
+                    contentDescription = "Add widget",
+                    modifier = Modifier.size(28.dp),
+                )
+            }
+            FilledTonalIconButton(
                 onClick = onExit,
-                modifier = Modifier.size(28.dp),
+                modifier = Modifier.size(48.dp),
             ) {
                 Icon(
                     Icons.Filled.Check,
                     contentDescription = "Done",
-                    modifier = Modifier.size(20.dp),
+                    modifier = Modifier.size(28.dp),
                 )
             }
         }
@@ -849,3 +870,4 @@ private fun OverlayButton(icon: ImageVector, desc: String, onClick: () -> Unit) 
         )
     }
 }
+
