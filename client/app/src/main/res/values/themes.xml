@@ -1,3 +1,6 @@
 <resources>
-    <style name="Theme.Humours" parent="android:Theme.Material.NoActionBar" />
+    <style name="Theme.Humours" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
 </resources>
