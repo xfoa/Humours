@@ -1,3 +1,4 @@
+
 package com.humours.client.ui
 
 import android.view.SurfaceView
@@ -36,7 +37,6 @@ import androidx.compose.material.icons.automirrored.filled.ViewQuilt
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Info
@@ -61,6 +61,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -126,14 +127,18 @@ fun GridScreen(
     val app = remember { context.applicationContext as HumoursApplication }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
-    val defaultSizePx = remember { with(density) { 180.dp.toPx().roundToInt() } }
+    val defaultSizePx = remember(density) { with(density) { 180.dp.toPx().roundToInt() } }
     var canvasWidthPx by remember { mutableStateOf(0) }
     var canvasHeightPx by remember { mutableStateOf(0) }
-    val fallback = remember(context) { realScreenSizePx(context) }
+    val configuration = LocalConfiguration.current
+    val fallback = remember(context, configuration.orientation) {
+        realScreenSizePx(context)
+    }
     val screenWidthPx = if (canvasWidthPx > 0) canvasWidthPx else fallback.first
     val screenHeightPx = if (canvasHeightPx > 0) canvasHeightPx else fallback.second
-    val gridCellXPx = remember(screenWidthPx) {
-        fitCell(screenWidthPx, 12)
+    val shortSide = minOf(screenWidthPx, screenHeightPx).coerceAtLeast(1)
+    val gridCellXPx = remember(shortSide) {
+        fitCell(shortSide, 12)
     }
     val gridCellYPx = remember(screenHeightPx, gridCellXPx) {
         val rows = (screenHeightPx.toFloat() / gridCellXPx.coerceAtLeast(1))
@@ -150,27 +155,83 @@ fun GridScreen(
     var previewRect by remember { mutableStateOf<IntRect?>(null) }
 
     var widgets by remember { mutableStateOf<List<WidgetPlacement>>(emptyList()) }
+    var lastScreenWidth by remember { mutableStateOf(0) }
+    var lastScreenHeight by remember { mutableStateOf(0) }
 
     val defaultPlugin = app.builtInPluginClassName
+
+    fun minSize(): Int = minOf(gridCellXPx, gridCellYPx).coerceAtLeast(1)
+
+    fun correctPlacement(p: WidgetPlacement): WidgetPlacement {
+        val sw = screenWidthPx
+        val sh = screenHeightPx
+        if (p.maximised) {
+            return p.copy(x = 0, y = 0, width = sw, height = sh)
+        }
+        val min = minSize()
+        val w = p.width.coerceIn(min, sw.coerceAtLeast(min))
+        val h = p.height.coerceIn(min, sh.coerceAtLeast(min))
+        val x = p.x.coerceIn(0, (sw - w).coerceAtLeast(0))
+        val y = p.y.coerceIn(0, (sh - h).coerceAtLeast(0))
+        return p.copy(x = x, y = y, width = w, height = h)
+    }
+
+    fun applyEdit(id: String, transform: (WidgetPlacement) -> WidgetPlacement) {
+        widgets = widgets.map { if (it.id == id) correctPlacement(transform(it)) else it }
+    }
 
     LaunchedEffect(Unit) {
         val stored = app.layoutStore.layout.first()
         if (stored.isEmpty()) {
             widgets = listOf(
-                WidgetPlacement(
-                    id = "widget-cube",
-                    plugin = defaultPlugin,
-                    x = 0, y = 0,
-                    width = defaultSizePx,
-                    height = defaultSizePx,
+                correctPlacement(
+                    WidgetPlacement(
+                        id = "widget-cube",
+                        plugin = defaultPlugin,
+                        x = 0, y = 0,
+                        width = defaultSizePx,
+                        height = defaultSizePx,
+                    )
                 )
             )
         } else {
             widgets = stored.map {
-                WidgetPlacement(it.id, it.plugin, it.x, it.y, it.width, it.height, it.maximised)
+                correctPlacement(
+                    WidgetPlacement(it.id, it.plugin, it.x, it.y, it.width, it.height, it.maximised)
+                )
             }
         }
+        lastScreenWidth = screenWidthPx
+        lastScreenHeight = screenHeightPx
         loaded = true
+    }
+
+    LaunchedEffect(screenWidthPx, screenHeightPx, loaded) {
+        if (!loaded) return@LaunchedEffect
+        if (screenWidthPx <= 0 || screenHeightPx <= 0) return@LaunchedEffect
+        if (lastScreenWidth <= 0 || lastScreenHeight <= 0) {
+            lastScreenWidth = screenWidthPx
+            lastScreenHeight = screenHeightPx
+            return@LaunchedEffect
+        }
+        if (lastScreenWidth == screenWidthPx && lastScreenHeight == screenHeightPx) return@LaunchedEffect
+        val scaleX = screenWidthPx.toFloat() / lastScreenWidth.toFloat()
+        val scaleY = screenHeightPx.toFloat() / lastScreenHeight.toFloat()
+        val min = minOf(gridCellXPx, gridCellYPx).coerceAtLeast(1)
+        val scaled = widgets.map { p ->
+            if (p.maximised) {
+                p.copy(x = 0, y = 0, width = screenWidthPx, height = screenHeightPx)
+            } else {
+                val nx = (p.x * scaleX).roundToInt()
+                val ny = (p.y * scaleY).roundToInt()
+                val nw = p.width.coerceIn(min, screenWidthPx.coerceAtLeast(min))
+                val nh = p.height.coerceIn(min, screenHeightPx.coerceAtLeast(min))
+                correctPlacement(p.copy(x = nx, y = ny, width = nw, height = nh))
+            }
+        }
+        if (scaled != widgets) widgets = scaled
+        lastScreenWidth = screenWidthPx
+        lastScreenHeight = screenHeightPx
     }
 
     LaunchedEffect(widgets, layoutMode) {
@@ -195,7 +256,19 @@ fun GridScreen(
         var id = "$base-${widgets.size + 1}"
         var i = widgets.size + 1
         while (widgets.any { it.id == id }) { i++; id = "$base-$i" }
-        widgets = widgets + WidgetPlacement(id, pluginClass, 0, 0, defaultSizePx, defaultSizePx)
+        val w = defaultSizePx
+        val h = defaultSizePx
+        var x = 0
+        var y = 0
+        val step = (gridCellXPx.coerceAtLeast(1))
+        val maxY = (screenHeightPx - h).coerceAtLeast(0)
+        val maxX = (screenWidthPx - w).coerceAtLeast(0)
+        while (widgets.any { it.x == x && it.y == y }) {
+            y += step
+            if (y > maxY) { y = 0; x += step }
+            if (x > maxX) { x = 0; y = 0; break }
+        }
+        widgets = widgets + WidgetPlacement(id, pluginClass, x, y, w, h)
         registerPlugin(app, id, pluginClass)
     }
 
@@ -240,6 +313,24 @@ fun GridScreen(
                     gridCellY = gridCellYPx,
                     screenWidth = screenWidthPx,
                     screenHeight = screenHeightPx,
+                    onMove = { id, x, y ->
+                        applyEdit(id) { it.copy(x = x, y = y) }
+                    },
+                    onResize = { id, x, y, w, h ->
+                        val min = minSize()
+                        val fitW = w.coerceIn(min, (screenWidthPx - x).coerceAtLeast(min))
+                        val fitH = h.coerceIn(min, (screenHeightPx - y).coerceAtLeast(min))
+                        widgets = widgets.map { p ->
+                            if (p.id == id) p.copy(x = x, y = y, width = fitW, height = fitH, maximised = false) else p
+                        }
+                    },
+                    onMaximiseToggle = { id ->
+                        applyEdit(id) { p ->
+                            val m = !p.maximised
+                            if (m) p.copy(maximised = true, x = 0, y = 0, width = screenWidthPx, height = screenHeightPx)
+                            else p.copy(maximised = false)
+                        }
+                    },
                     onDelete = { removeWidget(placement.id) },
                     onPreview = { previewRect = it },
                 )
@@ -420,24 +511,6 @@ private fun registerPlugin(app: HumoursApplication, id: String, pluginClass: Str
     app.pluginInstanceManager.register(PluginInstance(id, plugin, metrics))
 }
 
-private class WidgetGeom(
-    initialX: Int,
-    initialY: Int,
-    initialW: Int,
-    initialH: Int,
-) {
-    val x = mutableStateOf(initialX)
-    val y = mutableStateOf(initialY)
-    val w = mutableStateOf(initialW)
-    val h = mutableStateOf(initialH)
-    val maximised = mutableStateOf(false)
-
-    fun displayX(): Int = if (maximised.value) 0 else x.value
-    fun displayY(): Int = if (maximised.value) 0 else y.value
-    fun displayW(screenW: Int): Int = if (maximised.value) screenW else w.value
-    fun displayH(screenH: Int): Int = if (maximised.value) screenH else h.value
-}
-
 private fun fitCell(dimensionPx: Int, count: Int): Int {
     val c = count.coerceAtLeast(1)
     return (dimensionPx / c).coerceAtLeast(1)
@@ -469,6 +542,9 @@ private fun WidgetCanvasCell(
     gridCellY: Int,
     screenWidth: Int,
     screenHeight: Int,
+    onMove: (String, Int, Int) -> Unit,
+    onResize: (String, Int, Int, Int, Int) -> Unit,
+    onMaximiseToggle: (String) -> Unit,
     onDelete: () -> Unit,
     onPreview: (IntRect?) -> Unit,
 ) {
@@ -476,11 +552,10 @@ private fun WidgetCanvasCell(
     val app = remember { context.applicationContext as HumoursApplication }
     val density = LocalDensity.current
     val minSize = minOf(gridCellX, gridCellY).coerceAtLeast(1)
-    val geom = remember(placement.id) {
-        WidgetGeom(placement.x, placement.y, placement.width, placement.height).apply {
-            maximised.value = placement.maximised
-        }
-    }
+    val x = if (placement.maximised) 0 else placement.x
+    val y = if (placement.maximised) 0 else placement.y
+    val w = if (placement.maximised) screenWidth else placement.width.coerceIn(minSize, screenWidth.coerceAtLeast(minSize))
+    val h = if (placement.maximised) screenHeight else placement.height.coerceIn(minSize, screenHeight.coerceAtLeast(minSize))
     val xTargets = remember(screenWidth, gridCellX) { snapTargets(screenWidth, gridCellX) }
     val yTargets = remember(screenHeight, gridCellY) { snapTargets(screenHeight, gridCellY) }
 
@@ -494,10 +569,10 @@ private fun WidgetCanvasCell(
     Box(
         modifier = Modifier
             .onGloballyPositioned { coords = it }
-            .offset { IntOffset(geom.displayX(), geom.displayY()) }
+            .offset { IntOffset(x, y) }
             .size(
-                width = with(density) { geom.displayW(screenWidth).toDp() },
-                height = with(density) { geom.displayH(screenHeight).toDp() },
+                width = with(density) { w.toDp() },
+                height = with(density) { h.toDp() },
             )
             .then(
                 if (layoutMode) {
@@ -508,41 +583,38 @@ private fun WidgetCanvasCell(
                             shape = RoundedCornerShape(12.dp),
                         )
                         .then(
-                            if (!geom.maximised.value) {
-                                Modifier.pointerInput(layoutMode) {
+                            if (!placement.maximised) {
+                                Modifier.pointerInput(layoutMode, screenWidth, screenHeight, xTargets, yTargets, w, h, x, y) {
                                     var dragTotal = Offset.Zero
                                     detectDragGestures(
                                         onDragStart = {
                                             dragTotal = Offset.Zero
                                         },
                                         onDragEnd = {
-                                            val maxXw = (screenWidth - geom.w.value).coerceAtLeast(0)
-                                            val maxYh = (screenHeight - geom.h.value).coerceAtLeast(0)
-                                            val rawX = (geom.x.value + dragTotal.x.roundToInt()).coerceIn(0, maxXw)
-                                            val rawY = (geom.y.value + dragTotal.y.roundToInt()).coerceIn(0, maxYh)
+                                            val maxXw = (screenWidth - w).coerceAtLeast(0)
+                                            val maxYh = (screenHeight - h).coerceAtLeast(0)
+                                            val rawX = (x + dragTotal.x.roundToInt()).coerceIn(0, maxXw)
+                                            val rawY = (y + dragTotal.y.roundToInt()).coerceIn(0, maxYh)
                                             val sx = snapTo(rawX, xTargets)
                                             val sy = snapTo(rawY, yTargets)
-                                            geom.x.value = sx
-                                            geom.y.value = sy
-                                            placement.x = sx
-                                            placement.y = sy
+                                            onMove(placement.id, sx, sy)
                                             onPreview(null)
                                         },
                                         onDragCancel = { onPreview(null) },
                                     ) { _, drag ->
                                         dragTotal += drag
-                                        val maxXw = (screenWidth - geom.w.value).coerceAtLeast(0)
-                                        val maxYh = (screenHeight - geom.h.value).coerceAtLeast(0)
-                                        val rawX = (geom.x.value + dragTotal.x.roundToInt()).coerceIn(0, maxXw)
-                                        val rawY = (geom.y.value + dragTotal.y.roundToInt()).coerceIn(0, maxYh)
+                                        val maxXw = (screenWidth - w).coerceAtLeast(0)
+                                        val maxYh = (screenHeight - h).coerceAtLeast(0)
+                                        val rawX = (x + dragTotal.x.roundToInt()).coerceIn(0, maxXw)
+                                        val rawY = (y + dragTotal.y.roundToInt()).coerceIn(0, maxYh)
                                         val sx = snapTo(rawX, xTargets)
                                         val sy = snapTo(rawY, yTargets)
                                         onPreview(
                                             IntRect(
                                                 sx,
                                                 sy,
-                                                sx + geom.w.value,
-                                                sy + geom.h.value,
+                                                sx + w,
+                                                sy + h,
                                             )
                                         )
                                     }
@@ -553,39 +625,45 @@ private fun WidgetCanvasCell(
             )
             .clip(RoundedCornerShape(12.dp)),
     ) {
-        AndroidView(
-            factory = { ctx ->
-                FrameLayout(ctx).apply {
-                    val sv = SurfaceView(ctx)
-                    sv.holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
-                    sv.visibility = android.view.View.INVISIBLE
-                    sv.isClickable = false
-                    sv.isFocusable = false
-                    sv.isEnabled = false
-                    addView(
-                        sv,
-                        FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT,
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(RoundedCornerShape(12.dp)),
+        ) {
+            AndroidView(
+                factory = { ctx ->
+                    FrameLayout(ctx).apply {
+                        val sv = SurfaceView(ctx)
+                        sv.holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
+                        sv.visibility = android.view.View.INVISIBLE
+                        sv.isClickable = false
+                        sv.isFocusable = false
+                        sv.isEnabled = false
+                        addView(
+                            sv,
+                            FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            )
                         )
-                    )
-                    setOnTouchListener { _, _ -> false }
-                    isClickable = false
-                    isFocusable = false
-                    val metrics = metricsFor(pluginClass)
-                    val plugin = app.pluginLoader.load(pluginClass)
-                    if (plugin != null) {
-                        app.pluginInstanceManager.register(
-                            PluginInstance(placement.id, plugin, metrics)
-                        )
-                        app.pluginInstanceManager.startRendering(placement.id, sv) {}
+                        setOnTouchListener { _, _ -> false }
+                        isClickable = false
+                        isFocusable = false
+                        val metrics = metricsFor(pluginClass)
+                        val plugin = app.pluginLoader.load(pluginClass)
+                        if (plugin != null) {
+                            app.pluginInstanceManager.register(
+                                PluginInstance(placement.id, plugin, metrics)
+                            )
+                            app.pluginInstanceManager.startRendering(placement.id, sv) {}
+                        }
+                        postDelayed({ sv.visibility = android.view.View.VISIBLE }, 300)
+                        this
                     }
-                    postDelayed({ sv.visibility = android.view.View.VISIBLE }, 300)
-                    this
-                }
-            },
-            modifier = Modifier.fillMaxSize(),
-        )
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
 
         if (layoutMode) {
             Box(
@@ -609,7 +687,6 @@ private fun WidgetCanvasCell(
                     tint = MaterialTheme.colorScheme.onErrorContainer,
                 )
             }
-            val maximised = geom.maximised.value
             Surface(
                 shape = CircleShape,
                 color = MaterialTheme.colorScheme.primaryContainer,
@@ -617,33 +694,31 @@ private fun WidgetCanvasCell(
                     .align(Alignment.TopEnd)
                     .padding(4.dp)
                     .size(36.dp),
-                onClick = {
-                    geom.maximised.value = !maximised
-                    placement.maximised = !maximised
-                },
+                onClick = { onMaximiseToggle(placement.id) },
             ) {
                 Icon(
-                    if (maximised) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
-                    contentDescription = if (maximised) "Restore widget" else "Maximise widget",
+                    if (placement.maximised) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                    contentDescription = if (placement.maximised) "Restore widget" else "Maximise widget",
                     modifier = Modifier.padding(4.dp),
                     tint = MaterialTheme.colorScheme.onPrimaryContainer,
                 )
             }
-            var pendingW = geom.displayW(screenWidth)
-            var pendingH = geom.displayH(screenHeight)
-            var gestureStartW = 0
-            var gestureStartH = 0
+            var pendingW by remember(placement.id, screenWidth, screenHeight) { mutableStateOf(w) }
+            var pendingH by remember(placement.id, screenWidth, screenHeight) { mutableStateOf(h) }
+            var gestureStartW by remember(placement.id, screenWidth, screenHeight) { mutableStateOf(0) }
+            var gestureStartH by remember(placement.id, screenWidth, screenHeight) { mutableStateOf(0) }
             ResizeHandle(
                 modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(4.dp),
+                    .align(Alignment.BottomEnd),
                 onResizeStart = {
-                    gestureStartW = geom.displayW(screenWidth)
-                    gestureStartH = geom.displayH(screenHeight)
+                    gestureStartW = w
+                    gestureStartH = h
+                    pendingW = w
+                    pendingH = h
                 },
                 onResize = { totalDx, totalDy ->
-                    val originX = geom.displayX()
-                    val originY = geom.displayY()
+                    val originX = placement.x
+                    val originY = placement.y
                     val maxW = (screenWidth - originX).coerceAtLeast(minSize)
                     val maxH = (screenHeight - originY).coerceAtLeast(minSize)
                     val rawW = (gestureStartW + totalDx).coerceIn(minSize, maxW)
@@ -662,16 +737,11 @@ private fun WidgetCanvasCell(
                     )
                 },
                 onResizeEnd = {
-                    geom.x.value = geom.displayX()
-                    geom.y.value = geom.displayY()
-                    geom.w.value = pendingW
-                    geom.h.value = pendingH
-                    placement.x = geom.x.value
-                    placement.y = geom.y.value
-                    placement.width = pendingW
-                    placement.height = pendingH
-                    placement.maximised = false
-                    geom.maximised.value = false
+                    val maxWidth = (screenWidth - placement.x).coerceAtLeast(minSize)
+                    val maxHeight = (screenHeight - placement.y).coerceAtLeast(minSize)
+                    val finalW = pendingW.coerceAtMost(maxWidth)
+                    val finalH = pendingH.coerceAtMost(maxHeight)
+                    onResize(placement.id, placement.x, placement.y, finalW, finalH)
                     onPreview(null)
                 },
             )
@@ -686,32 +756,39 @@ private fun ResizeHandle(
     onResize: (Int, Int) -> Unit,
     onResizeEnd: () -> Unit = {},
 ) {
-    Surface(
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.primaryContainer,
+    val density = LocalDensity.current
+    val dotRadius = with(density) { 2.5.dp.toPx() }
+    val inset = with(density) { 10.dp.toPx() }
+    val step = with(density) { 8.dp.toPx() }
+    val dotColor = Color.White.copy(alpha = 0.5f)
+    val currentStart by rememberUpdatedState(onResizeStart)
+    val currentResize by rememberUpdatedState(onResize)
+    val currentEnd by rememberUpdatedState(onResizeEnd)
+    Box(
         modifier = modifier
-            .size(28.dp)
+            .size(48.dp)
             .pointerInput(Unit) {
                 var total = Offset.Zero
                 detectDragGestures(
                     onDragStart = {
                         total = Offset.Zero
-                        onResizeStart()
+                        currentStart()
                     },
-                    onDragEnd = onResizeEnd,
-                    onDragCancel = onResizeEnd,
+                    onDragEnd = { currentEnd() },
+                    onDragCancel = { currentEnd() },
                 ) { _, drag ->
                     total += drag
-                    onResize(total.x.roundToInt(), total.y.roundToInt())
+                    currentResize(total.x.roundToInt(), total.y.roundToInt())
                 }
             },
     ) {
-        Icon(
-            Icons.Filled.DragHandle,
-            contentDescription = "Resize",
-            modifier = Modifier.padding(4.dp),
-            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-        )
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val cx = size.width - inset
+            val cy = size.height - inset
+            drawCircle(dotColor, dotRadius, Offset(cx, cy - step))
+            drawCircle(dotColor, dotRadius, Offset(cx, cy))
+            drawCircle(dotColor, dotRadius, Offset(cx - step, cy))
+        }
     }
 }
 
